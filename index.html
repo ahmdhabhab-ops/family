@@ -281,8 +281,18 @@ async function addCustomAction(){
   paint();
 }
 
+async function editAction(at){
+  const label = prompt("Action name:", at.label);
+  if(!label) return;
+  const emoji = prompt("Emoji:", at.emoji);
+  if(!emoji) return;
+  await sbPatch("/homeapp_action_types?id=eq."+at.id, { label, emoji });
+  await loadStatic();
+  paint();
+}
+
 async function removeCustomAction(at){
-  if(!confirm("Remove '" + at.label + "'?")) return;
+  if(!confirm("Delete '" + at.label + "'? This also removes it from the Quick Actions grid and deletes any past activity logged under it.")) return;
   await sbDelete("/homeapp_action_types?id=eq."+at.id);
   await loadStatic();
   paint();
@@ -468,7 +478,13 @@ function settingsHTML(){
     <div class="settings-block">
       <h4>ACTIONS</h4>
       ${state.actionTypes.map(at => `
-        <div class="set-row"><span>${at.emoji} ${esc(at.label)}</span>${at.is_custom ? `<button data-remove="${at.id}">Remove</button>` : `<span style="color:var(--muted);font-size:12px;">built-in</span>`}</div>
+        <div class="set-row">
+          <span>${at.emoji} ${esc(at.label)}</span>
+          <span style="display:flex;gap:6px;">
+            <button data-edit="${at.id}">Edit</button>
+            <button data-remove="${at.id}">Delete</button>
+          </span>
+        </div>
       `).join("")}
       <div class="set-row"><span>Add a custom action</span><button id="addActionBtn">+ Add</button></div>
     </div>
@@ -549,6 +565,7 @@ function wireTabEvents(){
   if(state.tab === "settings"){
     const rb = document.getElementById("renameFamilyBtn"); if(rb) rb.onclick = renameFamily;
     root.querySelectorAll("[data-rename]").forEach(el => el.onclick = ()=> renameMember(state.members.find(m=>m.id===el.dataset.rename)));
+    root.querySelectorAll("[data-edit]").forEach(el => el.onclick = ()=> editAction(state.actionTypes.find(a=>a.id===el.dataset.edit)));
     root.querySelectorAll("[data-remove]").forEach(el => el.onclick = ()=> removeCustomAction(state.actionTypes.find(a=>a.id===el.dataset.remove)));
     const ns = document.getElementById("notifSwitch"); if(ns) ns.onclick = toggleNotifPermission;
     const aa = document.getElementById("addActionBtn"); if(aa) aa.onclick = addCustomAction;
@@ -560,13 +577,14 @@ function wireTabEvents(){
   try{
     await loadStatic();
     paint();
-    setInterval(()=>{
+    setInterval(async ()=>{
       // Don't tear down the screen (and re-stack modals) while the user
       // has a note sheet open or is mid-typing.
       if(state.pendingAction) return;
       if(document.querySelector(".overlay")) return;
       if(document.activeElement && (document.activeElement.tagName === "TEXTAREA" || document.activeElement.tagName === "INPUT")) return;
-      refreshAll();
+      try{ await loadStatic(); }catch(e){ console.error(e); }
+      await refreshAll();
     }, 2500);
   }catch(e){
     root.innerHTML = `<div class="empty">Couldn't connect to the backend.<br>${esc(e.message||"")}</div>`;
