@@ -276,7 +276,7 @@ async function addCustomAction(){
   const label = prompt("Name of new action (e.g. 'Watering plants'):");
   if(!label) return;
   const emoji = prompt("An emoji for it (e.g. 🌱):", "✨") || "✨";
-  await sbPost("/homeapp_action_types", { emoji, label, verb_template: "{name} did: " + label, allows_note:true, is_custom:true, sort_order:99 });
+  await sbPost("/homeapp_action_types", { emoji, label, verb_template: "{name} did: " + label, allows_note:false, is_custom:true, sort_order:99 });
   await loadStatic();
   paint();
 }
