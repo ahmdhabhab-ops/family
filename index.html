@@ -284,12 +284,21 @@ async function renameFamily(){
 }
 
 function toggleNotifPermission(){
-  if(!window.Notification){ alert("Notifications aren't supported in this browser."); return; }
+  if(!window.Notification){ alert("Notifications aren't supported in this browser/device."); return; }
   if(Notification.permission === "granted"){
     alert("Notifications are already enabled for this browser.");
-  } else {
-    Notification.requestPermission().then(()=> paint());
+    return;
   }
+  if(Notification.permission === "denied"){
+    alert("Notifications were previously blocked for this site. To turn them on, open your browser's site settings for this page (tap the lock/info icon in the address bar) and allow Notifications, then come back and try again.");
+    return;
+  }
+  Notification.requestPermission().then((perm)=>{
+    paint();
+    if(perm !== "granted"){
+      alert("Notifications weren't enabled. You can try again anytime from Settings.");
+    }
+  });
 }
 
 // ---------------- Rendering ----------------
@@ -538,7 +547,14 @@ function wireTabEvents(){
   try{
     await loadStatic();
     paint();
-    setInterval(refreshAll, 2500); // poll for "instant" updates across devices
+    setInterval(()=>{
+      // Don't tear down the screen (and re-stack modals) while the user
+      // has a note sheet open or is mid-typing.
+      if(state.pendingAction) return;
+      if(document.querySelector(".overlay")) return;
+      if(document.activeElement && (document.activeElement.tagName === "TEXTAREA" || document.activeElement.tagName === "INPUT")) return;
+      refreshAll();
+    }, 2500);
   }catch(e){
     root.innerHTML = `<div class="empty">Couldn't connect to the backend.<br>${esc(e.message||"")}</div>`;
   }
