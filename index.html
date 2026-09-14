@@ -58,6 +58,7 @@
   .feed-item .txt{font-size:15px;font-weight:600;margin:0;}
   .feed-item .note{font-size:13px;color:var(--muted);margin:4px 0 0;}
   .feed-item .time{font-size:12px;color:var(--muted);margin:4px 0 0;}
+  .share-btn{background:#E7F9EF;color:#128C4A;border:none;border-radius:10px;padding:6px 10px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;align-self:flex-start;}
   .empty{text-align:center;color:var(--muted);padding:40px 20px;font-size:14px;}
 
   /* ---------- Quick actions ---------- */
@@ -488,6 +489,25 @@ function feedItemHTML(ev){
   `;
 }
 
+function historyItemHTML(ev){
+  return `
+    <div class="feed-item">
+      <div class="icon">${ev.homeapp_action_types.emoji}</div>
+      <div class="body">
+        <p class="txt">${verbTextHTML(ev)}</p>
+        ${ev.note ? `<p class="note">"${esc(ev.note)}"</p>` : ""}
+        <p class="time">${fmtTime(ev.created_at)}</p>
+      </div>
+      <button class="share-btn" data-share="${ev.id}">📤 مشاركة</button>
+    </div>
+  `;
+}
+
+function shareToWhatsApp(ev){
+  const text = ev.homeapp_action_types.emoji + " " + verbText(ev) + (ev.note ? ` ("${ev.note}")` : "") + " — " + fmtTime(ev.created_at);
+  window.open("https://wa.me/?text=" + encodeURIComponent(text), "_blank");
+}
+
 function historyHTML(){
   const f = state.historyFilter;
   let list = state.events;
@@ -515,7 +535,7 @@ function historyHTML(){
       </select>
     </div>
     <div class="feed">
-      ${list.length ? list.map(feedItemHTML).join("") : `<div class="empty">Nothing matches this filter.</div>`}
+      ${list.length ? list.map(historyItemHTML).join("") : `<div class="empty">Nothing matches this filter.</div>`}
     </div>
   `;
 }
@@ -626,6 +646,10 @@ function wireTabEvents(){
     if(pSel) pSel.addEventListener("change", ()=>{ state.historyFilter.person = pSel.value; paint(); });
     const tSel = document.getElementById("typeSel");
     if(tSel) tSel.addEventListener("change", ()=>{ state.historyFilter.type = tSel.value; paint(); });
+    root.querySelectorAll("[data-share]").forEach(el => el.addEventListener("click", ()=>{
+      const ev = state.events.find(e => e.id === el.dataset.share);
+      if(ev) shareToWhatsApp(ev);
+    }));
   }
   if(state.tab === "settings"){
     const rb = document.getElementById("renameFamilyBtn"); if(rb) rb.onclick = renameFamily;
