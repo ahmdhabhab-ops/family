@@ -328,20 +328,13 @@ async function markAllRead(){
   await refreshAll();
 }
 
-async function renameMember(member){
-  const name = prompt("New name for " + member.name + ":", member.name);
-  if(!name || name.trim()==="" || name === member.name) return;
-  await sbPatch("/homeapp_members?id=eq."+member.id, { name: name.trim() });
-  await loadStatic();
-  if(state.me && state.me.id === member.id) state.me.name = name.trim();
-  paint();
-}
-
 async function addCustomAction(){
-  const label = prompt("Name of new action (e.g. 'Watering plants'):");
+  const label = prompt("اسم الأكشن (مثلاً: سقي النباتات):");
   if(!label) return;
-  const emoji = prompt("An emoji for it (e.g. 🌱):", "✨") || "✨";
-  await sbPost("/homeapp_action_types", { emoji, label, verb_template: "{name} did: " + label, allows_note:false, is_custom:true, sort_order:99 });
+  const emoji = prompt("إيموجي إلو (مثلاً 🌱):", "✨") || "✨";
+  const verb_template = prompt("الجملة يلي بتظهر بالـ feed (استخدم {name} مكان الاسم)، بصيغة المذكر:\nمثال: {name} سقى النباتات", "{name} " + label) || ("{name} " + label);
+  const verb_template_f = prompt("نفس الجملة بس بصيغة المؤنث (لسارة مثلاً):\nمثال: {name} سقت النباتات", verb_template) || verb_template;
+  await sbPost("/homeapp_action_types", { emoji, label, verb_template, verb_template_f, allows_note:false, is_custom:true, sort_order:99 });
   await loadStatic();
   paint();
 }
@@ -351,7 +344,9 @@ async function editAction(at){
   if(!label) return;
   const emoji = prompt("Emoji:", at.emoji);
   if(!emoji) return;
-  await sbPatch("/homeapp_action_types?id=eq."+at.id, { label, emoji });
+  const verb_template = prompt("جملة الـ feed (مذكر) — استخدم {name}:", at.verb_template) || at.verb_template;
+  const verb_template_f = prompt("نفس الجملة (مؤنث):", at.verb_template_f || verb_template) || verb_template;
+  await sbPatch("/homeapp_action_types?id=eq."+at.id, { label, emoji, verb_template, verb_template_f });
   await loadStatic();
   paint();
 }
@@ -534,7 +529,7 @@ function settingsHTML(){
     <div class="settings-block">
       <h4>MEMBERS (4 max for this MVP)</h4>
       ${state.members.map(m => `
-        <div class="set-row"><span>${m.emoji} <bdi>${esc(m.name)}</bdi></span><button data-rename="${m.id}">Rename</button></div>
+        <div class="set-row"><span>${m.emoji} <bdi>${esc(m.name)}</bdi></span></div>
       `).join("")}
     </div>
     <div class="settings-block">
@@ -634,7 +629,6 @@ function wireTabEvents(){
   }
   if(state.tab === "settings"){
     const rb = document.getElementById("renameFamilyBtn"); if(rb) rb.onclick = renameFamily;
-    root.querySelectorAll("[data-rename]").forEach(el => el.onclick = ()=> renameMember(state.members.find(m=>m.id===el.dataset.rename)));
     root.querySelectorAll("[data-edit]").forEach(el => el.onclick = ()=> editAction(state.actionTypes.find(a=>a.id===el.dataset.edit)));
     root.querySelectorAll("[data-remove]").forEach(el => el.onclick = ()=> removeCustomAction(state.actionTypes.find(a=>a.id===el.dataset.remove)));
     const ns = document.getElementById("notifSwitch"); if(ns) ns.onclick = toggleNotifPermission;
