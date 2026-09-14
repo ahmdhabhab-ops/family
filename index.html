@@ -181,16 +181,20 @@ function isThisWeek(iso){
   const start = new Date(n); start.setDate(n.getDate() - n.getDay()); start.setHours(0,0,0,0);
   return d >= start;
 }
+function pickTemplate(actionType, member){
+  if(member.gender === "f" && actionType.verb_template_f) return actionType.verb_template_f;
+  return actionType.verb_template;
+}
 function verbText(ev){
-  const tpl = ev.homeapp_action_types.verb_template;
+  const tpl = pickTemplate(ev.homeapp_action_types, ev.homeapp_members);
   return tpl.replace("{name}", ev.homeapp_members.name);
 }
 function verbTextHTML(ev){
-  const tpl = ev.homeapp_action_types.verb_template;
+  const tpl = pickTemplate(ev.homeapp_action_types, ev.homeapp_members);
   return tpl.replace("{name}", "<bdi>" + esc(ev.homeapp_members.name) + "</bdi>");
 }
 function notifVerbHTML(n){
-  const tpl = n.homeapp_events.homeapp_action_types.verb_template;
+  const tpl = pickTemplate(n.homeapp_events.homeapp_action_types, n.homeapp_events.homeapp_members);
   return tpl.replace("{name}", "<bdi>" + esc(n.homeapp_events.homeapp_members.name) + "</bdi>");
 }
 
@@ -208,7 +212,7 @@ async function loadStatic(){
 }
 
 async function loadEvents(){
-  const events = await sbGet("/homeapp_events?select=id,note,created_at,member_id,homeapp_members(id,name,emoji,color),homeapp_action_types(id,emoji,label,verb_template)&order=created_at.desc&limit=200");
+  const events = await sbGet("/homeapp_events?select=id,note,created_at,member_id,homeapp_members(id,name,emoji,color,gender),homeapp_action_types(id,emoji,label,verb_template,verb_template_f)&order=created_at.desc&limit=200");
   // detect new events from other people for notification/toast
   if(state.me){
     for(const ev of events){
@@ -230,7 +234,7 @@ async function loadEvents(){
 
 async function loadUnread(){
   if(!state.me) return;
-  state.unread = await sbGet("/homeapp_notifications?recipient_member_id=eq."+state.me.id+"&is_read=eq.false&select=id,created_at,homeapp_events(id,note,created_at,homeapp_members(name,emoji),homeapp_action_types(emoji,label,verb_template))&order=created_at.desc");
+  state.unread = await sbGet("/homeapp_notifications?recipient_member_id=eq."+state.me.id+"&is_read=eq.false&select=id,created_at,homeapp_events(id,note,created_at,homeapp_members(name,emoji,gender),homeapp_action_types(emoji,label,verb_template,verb_template_f))&order=created_at.desc");
 }
 
 async function refreshAll(render=true){
@@ -290,7 +294,7 @@ async function performAction(actionType, note){
     const others = state.members.filter(m => m.id !== state.me.id);
     if(others.length){
       await sbPost("/homeapp_notifications", others.map(m => ({ event_id: ev.id, recipient_member_id: m.id })));
-      const sentence = actionType.verb_template.replace("{name}", state.me.name);
+      const sentence = pickTemplate(actionType, state.me).replace("{name}", state.me.name);
       sendPush(state.familyName, actionType.emoji + " " + sentence, others.map(m => m.id));
     }
     await refreshAll();
