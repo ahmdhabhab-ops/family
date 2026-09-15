@@ -138,23 +138,36 @@ function urlBase64ToUint8Array(base64String){
 function sbHeaders(extra){
   return Object.assign({ "apikey": SUPABASE_ANON_KEY, "Authorization": "Bearer " + SUPABASE_ANON_KEY, "Content-Type": "application/json" }, extra||{});
 }
+async function sbFetch(path, opts){
+  const controller = new AbortController();
+  const timer = setTimeout(()=> controller.abort(), 15000); // never let a request hang silently forever
+  try{
+    const r = await fetch(REST + path, Object.assign({}, opts, { signal: controller.signal }));
+    return r;
+  }catch(e){
+    if(e.name === "AbortError") throw new Error("انتهى وقت الانتظار (15 ثانية) — تأكد من اتصالك بالإنترنت وجرّب كمان مرة.");
+    throw e;
+  }finally{
+    clearTimeout(timer);
+  }
+}
 async function sbGet(path){
-  const r = await fetch(REST + path, { headers: sbHeaders() });
+  const r = await sbFetch(path, { headers: sbHeaders() });
   if(!r.ok) throw new Error(await r.text());
   return r.json();
 }
 async function sbPost(path, body){
-  const r = await fetch(REST + path, { method:"POST", headers: sbHeaders({ "Prefer":"return=representation" }), body: JSON.stringify(body) });
+  const r = await sbFetch(path, { method:"POST", headers: sbHeaders({ "Prefer":"return=representation" }), body: JSON.stringify(body) });
   if(!r.ok) throw new Error(await r.text());
   return r.json();
 }
 async function sbPatch(path, body){
-  const r = await fetch(REST + path, { method:"PATCH", headers: sbHeaders({ "Prefer":"return=representation" }), body: JSON.stringify(body) });
+  const r = await sbFetch(path, { method:"PATCH", headers: sbHeaders({ "Prefer":"return=representation" }), body: JSON.stringify(body) });
   if(!r.ok) throw new Error(await r.text());
   return r.json();
 }
 async function sbDelete(path){
-  const r = await fetch(REST + path, { method:"DELETE", headers: sbHeaders() });
+  const r = await sbFetch(path, { method:"DELETE", headers: sbHeaders() });
   if(!r.ok) throw new Error(await r.text());
 }
 
