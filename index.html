@@ -371,6 +371,13 @@ async function toggleLocationSharing(){
   paint();
 }
 
+function geoErrorMessage(err){
+  if(err.code === 1) return "ما عطيتنا إذن نوصل لموقعك. لازم توافق عالإذن (أو تفعّله من إعدادات الموقع/المتصفح لهالصفحة) وبعدين جرّب كمان مرة.";
+  if(err.code === 2) return "ما قدرنا نحدد موقعك حاليًا (GPS مش متوفر أو الإشارة ضعيفة). جرّب تفتح GPS/خدمات الموقع عالجهاز وجرّب برا أو حدا الشباك.";
+  if(err.code === 3) return "أخد وقت أطول من اللازم يلاقي موقعك. جرّب كمان مرة، أو تأكد إنو GPS مفعّل عالجهاز.";
+  return "ما قدرنا ناخد موقعك: " + (err.message || "خطأ غير معروف");
+}
+
 function useCurrentLocationAsHome(){
   if(!("geolocation" in navigator)){ alert("الموقع مش مدعوم بهالمتصفح."); return; }
   navigator.geolocation.getCurrentPosition(async (pos)=>{
@@ -382,8 +389,9 @@ function useCurrentLocationAsHome(){
     paint();
     startLocationTracking();
   }, (err)=>{
-    alert("ما قدرنا ناخد موقعك: " + err.message);
-  }, { enableHighAccuracy: true, timeout: 15000 });
+    console.error("getCurrentPosition failed:", err);
+    alert(geoErrorMessage(err));
+  }, { enableHighAccuracy: true, timeout: 30000, maximumAge: 0 });
 }
 
 async function editHomeRadius(){
@@ -397,14 +405,25 @@ async function editHomeRadius(){
   paint();
 }
 
+async function getQuickPosition(){
+  if(!("geolocation" in navigator)) return null;
+  return new Promise((resolve)=>{
+    navigator.geolocation.getCurrentPosition(
+      (pos)=> resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      ()=> resolve(null),
+      { enableHighAccuracy: true, timeout: 12000, maximumAge: 30000 }
+    );
+  });
+}
+
 let homeMapInstance = null, homeMapMarker = null, homeMapPickedLatLng = null;
-function openMapPicker(){
+async function openMapPicker(){
   const overlay = document.createElement("div");
   overlay.className = "overlay";
   overlay.innerHTML = `
     <div class="sheet">
       <h3>🗺️ حدد موقع البيت عالخريطة</h3>
-      <p class="sub">دوس عالخريطة لتحط العلامة مكان البيت</p>
+      <p class="sub" id="mapPickerSub">عم نحدد مكانك الحالي...</p>
       <div id="homeMapPicker"></div>
       <div class="row">
         <button class="btn ghost" id="cancelMapPick">إلغاء</button>
@@ -414,12 +433,21 @@ function openMapPicker(){
   `;
   document.body.appendChild(overlay);
 
-  const startLat = state.homeLocation?.lat || 33.8938;
-  const startLng = state.homeLocation?.lng || 35.5018;
+  // If a home is already set, center on it (so they can nudge it); otherwise
+  // start from the user's current GPS position so they don't have to hunt
+  // around the map to find themselves.
+  let startLat = state.homeLocation?.lat, startLng = state.homeLocation?.lng;
+  if(startLat == null || startLng == null){
+    const here = await getQuickPosition();
+    if(here){ startLat = here.lat; startLng = here.lng; }
+    else { startLat = 33.8938; startLng = 35.5018; } // fallback: Beirut, only if GPS truly unavailable
+  }
+  const subEl = document.getElementById("mapPickerSub");
+  if(subEl) subEl.textContent = "دوس عالخريطة أو اسحب العلامة لتحط مكان البيت";
   homeMapPickedLatLng = { lat: startLat, lng: startLng };
 
   setTimeout(()=>{
-    homeMapInstance = L.map("homeMapPicker").setView([startLat, startLng], state.homeLocation ? 16 : 12);
+    homeMapInstance = L.map("homeMapPicker").setView([startLat, startLng], 16);
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "© OpenStreetMap" }).addTo(homeMapInstance);
     homeMapMarker = L.marker([startLat, startLng], { draggable: true }).addTo(homeMapInstance);
     homeMapMarker.on("dragend", ()=>{ const p = homeMapMarker.getLatLng(); homeMapPickedLatLng = { lat: p.lat, lng: p.lng }; });
