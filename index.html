@@ -383,14 +383,38 @@ function setLocStatus(msg){
   if(el) el.textContent = msg;
 }
 
-function useCurrentLocationAsHome(){
-  setLocStatus("⏳ عم نحاول ناخد موقعك...");
+async function useCurrentLocationAsHome(){
   if(!("geolocation" in navigator)){
     setLocStatus("❌ الموقع مش مدعوم بهالمتصفح.");
-    alert("الموقع مش مدعوم بهالمتصفح.");
     return;
   }
+
+  // Show the current permission state up front — this alone often explains a lot.
+  if(navigator.permissions && navigator.permissions.query){
+    try{
+      const st = await navigator.permissions.query({ name: "geolocation" });
+      const label = st.state === "granted" ? "مسموح ✅" : st.state === "denied" ? "ممنوع ❌" : "لسا ما تحدد (رح يسألك الآن)";
+      setLocStatus("⏳ حالة الإذن: " + label + " — عم نحاول ناخد موقعك...");
+    }catch(e){ setLocStatus("⏳ عم نحاول ناخد موقعك..."); }
+  } else {
+    setLocStatus("⏳ عم نحاول ناخد موقعك...");
+  }
+
+  let settled = false;
+  // A manual, guaranteed timeout — some browsers/devices never call either
+  // callback if system-wide Location Services are off, ignoring the
+  // geolocation API's own `timeout` option. This makes sure the user always
+  // gets a message instead of the status hanging forever.
+  const manualTimeout = setTimeout(()=>{
+    if(settled) return;
+    settled = true;
+    setLocStatus("❌ المتصفح ما ردّ خلال 20 ثانية. تأكد إنو خدمات الموقع (GPS) مفعّلة من إعدادات الموبايل نفسو (مش بس المتصفح) — بالأندرويد: Settings → Location → On. جرّب كمان مرة بعدها.");
+  }, 20000);
+
   navigator.geolocation.getCurrentPosition(async (pos)=>{
+    if(settled) return;
+    settled = true;
+    clearTimeout(manualTimeout);
     const { latitude, longitude } = pos.coords;
     await upsertSetting("home_lat", latitude);
     await upsertSetting("home_lng", longitude);
@@ -399,9 +423,12 @@ function useCurrentLocationAsHome(){
     setLocStatus("✅ تم تحديد موقع البيت!");
     startLocationTracking();
   }, (err)=>{
+    if(settled) return;
+    settled = true;
+    clearTimeout(manualTimeout);
     console.error("getCurrentPosition failed:", err);
     setLocStatus("❌ " + geoErrorMessage(err));
-  }, { enableHighAccuracy: true, timeout: 30000, maximumAge: 0 });
+  }, { enableHighAccuracy: true, timeout: 19000, maximumAge: 0 });
 }
 
 async function editHomeRadius(){
@@ -424,6 +451,33 @@ async function getQuickPosition(){
       { enableHighAccuracy: true, timeout: 12000, maximumAge: 30000 }
     );
   });
+}
+
+function loadScript(src){
+  return new Promise((resolve, reject)=>{
+    const s = document.createElement("script");
+    s.src = src; s.onload = ()=>resolve(true); s.onerror = ()=>reject(new Error("failed: "+src));
+    document.head.appendChild(s);
+  });
+}
+function loadCss(href){
+  const l = document.createElement("link");
+  l.rel = "stylesheet"; l.href = href;
+  document.head.appendChild(l);
+}
+let leafletLoadAttempted = false;
+async function ensureLeaflet(){
+  if(typeof L !== "undefined") return true;
+  if(leafletLoadAttempted) return typeof L !== "undefined";
+  leafletLoadAttempted = true;
+  try{
+    loadCss("https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.min.css");
+    await loadScript("https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.min.js");
+    return typeof L !== "undefined";
+  }catch(e){
+    console.error("Leaflet fallback CDN also failed:", e);
+    return false;
+  }
 }
 
 let homeMapInstance = null, homeMapMarker = null, homeMapPickedLatLng = null;
@@ -456,10 +510,11 @@ async function openMapPicker(){
   if(subEl) subEl.textContent = "دوس عالخريطة أو اسحب العلامة لتحط مكان البيت";
   homeMapPickedLatLng = { lat: startLat, lng: startLng };
 
-  setTimeout(()=>{
-    if(typeof L === "undefined"){
+  setTimeout(async ()=>{
+    const leafletReady = await ensureLeaflet();
+    if(!leafletReady){
       const mapDiv = document.getElementById("homeMapPicker");
-      if(mapDiv) mapDiv.innerHTML = `<div class="empty" style="padding:20px;">تعذّر تحميل الخريطة (مشكلة اتصال بالإنترنت). جرّب زر "📍 موقعي الحالي" بدالها، أو تأكد من الاتصال وجرّب كمان مرة.</div>`;
+      if(mapDiv) mapDiv.innerHTML = `<div class="empty" style="padding:20px;">تعذّر تحميل الخريطة (مشكلة اتصال بالإنترنت مع خدمة الخرائط). جرّب زر "📍 موقعي الحالي" بدالها، أو تأكد من الاتصال وجرّب كمان مرة.</div>`;
       return;
     }
     homeMapInstance = L.map("homeMapPicker").setView([startLat, startLng], 16);
