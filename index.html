@@ -12,6 +12,8 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Our Home">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <style>
   :root{
     --bg:#F6F3FF; --card:#FFFFFF; --text:#1F2333; --muted:#8A8FA3;
@@ -42,6 +44,9 @@
   .member-chip{flex:0 0 auto;background:var(--card);border-radius:16px;padding:10px 14px;box-shadow:var(--shadow);display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600;border:2px solid transparent;}
   .member-chip.me{border-color:var(--brand);}
   .member-chip .em{font-size:20px;}
+  .status-dot{width:9px;height:9px;border-radius:50%;display:inline-block;margin-inline-start:2px;}
+  .dot-home{background:#22C55E;}
+  .dot-away{background:#FF4D4F;}
 
   /* ---------- Tabs ---------- */
   .tabs{display:flex;gap:8px;padding:14px 18px 4px;}
@@ -104,6 +109,12 @@
   .switch .knob{position:absolute;top:3px;left:3px;width:20px;height:20px;background:white;border-radius:50%;transition:.15s;}
   .switch.on .knob{left:21px;}
   input.txtinput{border:1px solid #E5E1FA;border-radius:10px;padding:8px 10px;font-size:13px;font-family:inherit;}
+
+  /* geofencing additions */
+  .home-badge{font-size:10px;font-weight:800;padding:2px 6px;border-radius:8px;margin-inline-start:4px;}
+  .home-badge.home{background:#E7F9EF;color:#128C4A;}
+  .home-badge.away{background:#FDECEC;color:#D64545;}
+  #homeMapPicker{width:100%;height:280px;border-radius:14px;margin:10px 0;}
 </style>
 </head>
 <body>
@@ -159,7 +170,9 @@ const state = {
   unread: [],
   notifPermAsked: false,
   historyFilter: { range: "today", person: "all", type: "all" },
-  pendingAction: null // action type awaiting a note
+  pendingAction: null, // action type awaiting a note
+  homeLocation: null,  // { lat, lng, radius }
+  watchId: null
 };
 
 const root = document.getElementById("app");
@@ -215,6 +228,10 @@ async function loadStatic(){
   state.actionTypes = actionTypes;
   const fn = settings.find(s => s.key === "family_name");
   if(fn) state.familyName = fn.value;
+  const hlat = settings.find(s => s.key === "home_lat");
+  const hlng = settings.find(s => s.key === "home_lng");
+  const hrad = settings.find(s => s.key === "home_radius_m");
+  state.homeLocation = (hlat && hlng) ? { lat: parseFloat(hlat.value), lng: parseFloat(hlng.value), radius: hrad ? parseInt(hrad.value,10) : 100 } : null;
 }
 
 async function loadEvents(){
@@ -290,6 +307,135 @@ async function sendPush(title, body, recipientIds){
       body: JSON.stringify({ title, body, recipient_member_ids: recipientIds })
     });
   }catch(e){ console.error("send-push failed:", e); }
+}
+
+// ---------------- Home Geofencing ----------------
+async function upsertSetting(key, value){
+  const patched = await sbPatch("/homeapp_settings?key=eq."+key, { value: String(value) });
+  if(!patched || !patched.length){
+    await sbPost("/homeapp_settings", { key, value: String(value) });
+  }
+}
+
+function distMeters(lat1, lng1, lat2, lng2){
+  const R = 6371000;
+  const toRad = d => d * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1), dLng = toRad(lng2 - lng1);
+  const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+async function onPositionUpdate(pos){
+  if(!state.me || !state.homeLocation) return;
+  const { latitude, longitude } = pos.coords;
+  const d = distMeters(latitude, longitude, state.homeLocation.lat, state.homeLocation.lng);
+  const nowHome = d <= state.homeLocation.radius;
+  const wasHome = state.me.is_home;
+
+  await sbPost("/homeapp_member_location?on_conflict=member_id", [{ member_id: state.me.id, lat: latitude, lng: longitude, updated_at: new Date().toISOString() }])
+    .catch(()=> sbPatch("/homeapp_member_location?member_id=eq."+state.me.id, { lat: latitude, lng: longitude, updated_at: new Date().toISOString() }));
+  await sbPatch("/homeapp_members?id=eq."+state.me.id, { is_home: nowHome });
+  state.me.is_home = nowHome;
+
+  if(wasHome !== null && wasHome !== nowHome){
+    const label = nowHome ? "وصلت عالبيت" : "طالع من البيت";
+    const at = state.actionTypes.find(a => a.label === label);
+    if(at) await performAction(at, null);
+  } else if(state.tab === "home"){
+    paint();
+  }
+}
+
+function startLocationTracking(){
+  if(!("geolocation" in navigator) || state.watchId !== null) return;
+  if(!state.me || !state.me.location_sharing || !state.homeLocation) return;
+  state.watchId = navigator.geolocation.watchPosition(
+    onPositionUpdate,
+    (err)=> console.error("Geolocation error:", err),
+    { enableHighAccuracy: false, maximumAge: 30000, timeout: 25000 }
+  );
+}
+
+function stopLocationTracking(){
+  if(state.watchId !== null){
+    navigator.geolocation.clearWatch(state.watchId);
+    state.watchId = null;
+  }
+}
+
+async function toggleLocationSharing(){
+  const next = !state.me.location_sharing;
+  await sbPatch("/homeapp_members?id=eq."+state.me.id, { location_sharing: next, is_home: next ? state.me.is_home : null });
+  state.me.location_sharing = next;
+  if(next) startLocationTracking(); else stopLocationTracking();
+  paint();
+}
+
+function useCurrentLocationAsHome(){
+  if(!("geolocation" in navigator)){ alert("الموقع مش مدعوم بهالمتصفح."); return; }
+  navigator.geolocation.getCurrentPosition(async (pos)=>{
+    const { latitude, longitude } = pos.coords;
+    await upsertSetting("home_lat", latitude);
+    await upsertSetting("home_lng", longitude);
+    state.homeLocation = { lat: latitude, lng: longitude, radius: state.homeLocation?.radius || 100 };
+    alert("تم تحديد موقع البيت ✅");
+    paint();
+    startLocationTracking();
+  }, (err)=>{
+    alert("ما قدرنا ناخد موقعك: " + err.message);
+  }, { enableHighAccuracy: true, timeout: 15000 });
+}
+
+async function editHomeRadius(){
+  const current = state.homeLocation?.radius || 100;
+  const val = prompt("نصف قطر منطقة البيت (بالمتر):", String(current));
+  if(!val) return;
+  const n = parseInt(val, 10);
+  if(!n || n < 10) { alert("رقم غير صالح"); return; }
+  await upsertSetting("home_radius_m", n);
+  if(state.homeLocation) state.homeLocation.radius = n;
+  paint();
+}
+
+let homeMapInstance = null, homeMapMarker = null, homeMapPickedLatLng = null;
+function openMapPicker(){
+  const overlay = document.createElement("div");
+  overlay.className = "overlay";
+  overlay.innerHTML = `
+    <div class="sheet">
+      <h3>🗺️ حدد موقع البيت عالخريطة</h3>
+      <p class="sub">دوس عالخريطة لتحط العلامة مكان البيت</p>
+      <div id="homeMapPicker"></div>
+      <div class="row">
+        <button class="btn ghost" id="cancelMapPick">إلغاء</button>
+        <button class="btn primary" id="saveMapPick">حفظ</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const startLat = state.homeLocation?.lat || 33.8938;
+  const startLng = state.homeLocation?.lng || 35.5018;
+  homeMapPickedLatLng = { lat: startLat, lng: startLng };
+
+  setTimeout(()=>{
+    homeMapInstance = L.map("homeMapPicker").setView([startLat, startLng], state.homeLocation ? 16 : 12);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "© OpenStreetMap" }).addTo(homeMapInstance);
+    homeMapMarker = L.marker([startLat, startLng], { draggable: true }).addTo(homeMapInstance);
+    homeMapMarker.on("dragend", ()=>{ const p = homeMapMarker.getLatLng(); homeMapPickedLatLng = { lat: p.lat, lng: p.lng }; });
+    homeMapInstance.on("click", (e)=>{ homeMapMarker.setLatLng(e.latlng); homeMapPickedLatLng = { lat: e.latlng.lat, lng: e.latlng.lng }; });
+  }, 50);
+
+  document.getElementById("cancelMapPick").onclick = ()=>{ overlay.remove(); homeMapInstance = null; };
+  document.getElementById("saveMapPick").onclick = async ()=>{
+    await upsertSetting("home_lat", homeMapPickedLatLng.lat);
+    await upsertSetting("home_lng", homeMapPickedLatLng.lng);
+    state.homeLocation = { lat: homeMapPickedLatLng.lat, lng: homeMapPickedLatLng.lng, radius: state.homeLocation?.radius || 100 };
+    overlay.remove();
+    homeMapInstance = null;
+    paint();
+    startLocationTracking();
+  };
 }
 
 // ---------------- Actions ----------------
@@ -419,6 +565,7 @@ function renderLogin(){
       state.me = state.members.find(m => m.id === el.dataset.id);
       refreshAll();
       ensurePushSubscription();
+      startLocationTracking();
     });
   });
 }
@@ -435,6 +582,7 @@ function renderApp(){
         ${state.members.map(m => `
           <div class="member-chip ${m.id===state.me.id?'me':''}" data-switch="${m.id}">
             <span class="em">${m.emoji}</span><span><bdi>${esc(m.name)}</bdi></span>
+            ${m.location_sharing && m.is_home !== null ? `<span class="home-badge ${m.is_home ? 'home' : 'away'}">${m.is_home ? '🟢 بالبيت' : '🔴 برا'}</span>` : ""}
           </div>`).join("")}
       </div>
       <div class="tabs">
@@ -453,7 +601,7 @@ function renderApp(){
   root.querySelectorAll("[data-tab]").forEach(el => el.addEventListener("click", ()=>{ state.tab = el.dataset.tab; paint(); }));
   root.querySelectorAll("[data-switch]").forEach(el => el.addEventListener("click", ()=>{
     const m = state.members.find(x=>x.id===el.dataset.switch);
-    if(m){ state.me = m; refreshAll(); }
+    if(m){ stopLocationTracking(); state.me = m; refreshAll(); startLocationTracking(); }
   }));
   document.getElementById("bellBtn").addEventListener("click", renderNotifPanel);
 
@@ -550,6 +698,26 @@ function settingsHTML(){
     <div class="settings-block">
       <h4>FAMILY</h4>
       <div class="set-row"><span>${esc(state.familyName)}</span><button id="renameFamilyBtn">Rename</button></div>
+    </div>
+    <div class="settings-block">
+      <h4>🏠 HOME LOCATION</h4>
+      <div class="set-row">
+        <span>${state.homeLocation ? `موقع محدد ✅ (نصف قطر ${state.homeLocation.radius}م)` : "ما تحدد موقع البيت لسا"}</span>
+      </div>
+      <div class="row" style="margin-top:8px;">
+        <button class="btn ghost" id="useMyLocationBtn" style="flex:1;">📍 موقعي الحالي</button>
+        <button class="btn ghost" id="pickOnMapBtn" style="flex:1;">🗺️ من الخريطة</button>
+      </div>
+      <div class="set-row" style="margin-top:6px;"><span>نصف القطر (متر)</span><button id="editRadiusBtn">تعديل</button></div>
+      <p style="color:var(--muted);font-size:11px;margin:8px 0 0;">⚠️ التتبّع بيشتغل بس لمّا التطبيق مفتوح (أو بالخلفية القريبة) عبراوزر الموبايل — مش تتبّع حقيقي بالخلفية لمّا التطبيق مسكّر تمامًا، هيدا قيد من أبل/غوغل على مواقع الويب مش شي فينا نتخطاه بدون تطبيق حقيقي (native).</p>
+    </div>
+    <div class="settings-block">
+      <h4>📍 MY LOCATION SHARING</h4>
+      <div class="set-row">
+        <span>شارك موقعي مع أهل البيت</span>
+        <div class="switch ${state.me.location_sharing ? 'on':''}" id="locShareSwitch"><div class="knob"></div></div>
+      </div>
+      <p style="color:var(--muted);font-size:12px;margin:6px 0 0;">لما تكون مفعّلة، الباقي بيشوفو بس 🟢 بالبيت / 🔴 برا — مش موقعك بالتفصيل.</p>
     </div>
     <div class="settings-block">
       <h4>MEMBERS (4 max for this MVP)</h4>
@@ -662,6 +830,10 @@ function wireTabEvents(){
     root.querySelectorAll("[data-remove]").forEach(el => el.onclick = ()=> removeCustomAction(state.actionTypes.find(a=>a.id===el.dataset.remove)));
     const ns = document.getElementById("notifSwitch"); if(ns) ns.onclick = toggleNotifPermission;
     const aa = document.getElementById("addActionBtn"); if(aa) aa.onclick = addCustomAction;
+    const ul = document.getElementById("useMyLocationBtn"); if(ul) ul.onclick = useCurrentLocationAsHome;
+    const pm = document.getElementById("pickOnMapBtn"); if(pm) pm.onclick = openMapPicker;
+    const er = document.getElementById("editRadiusBtn"); if(er) er.onclick = editHomeRadius;
+    const ls = document.getElementById("locShareSwitch"); if(ls) ls.onclick = toggleLocationSharing;
   }
 }
 
