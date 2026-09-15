@@ -990,9 +990,13 @@ function renderActionSheet(){
     postBtn().disabled = true;
     postBtn().textContent = "⏳ عم ننشر...";
     if(statusEl()) statusEl().textContent = "";
+    // Clear this BEFORE calling performAction: performAction refreshes data
+    // internally (which repaints), and paint() re-opens this sheet whenever
+    // state.pendingAction is still set — leaving it set here would stack a
+    // second sheet on top of this one while we're mid-submit.
+    state.pendingAction = null;
     try{
       await performAction(at, note || null);
-      state.pendingAction = null;
       overlay.remove();
     }catch(e){
       console.error("Post from note sheet failed:", e);
