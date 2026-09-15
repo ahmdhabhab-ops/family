@@ -378,19 +378,29 @@ function geoErrorMessage(err){
   return "ما قدرنا ناخد موقعك: " + (err.message || "خطأ غير معروف");
 }
 
+function setLocStatus(msg){
+  const el = document.getElementById("locStatusMsg");
+  if(el) el.textContent = msg;
+}
+
 function useCurrentLocationAsHome(){
-  if(!("geolocation" in navigator)){ alert("الموقع مش مدعوم بهالمتصفح."); return; }
+  setLocStatus("⏳ عم نحاول ناخد موقعك...");
+  if(!("geolocation" in navigator)){
+    setLocStatus("❌ الموقع مش مدعوم بهالمتصفح.");
+    alert("الموقع مش مدعوم بهالمتصفح.");
+    return;
+  }
   navigator.geolocation.getCurrentPosition(async (pos)=>{
     const { latitude, longitude } = pos.coords;
     await upsertSetting("home_lat", latitude);
     await upsertSetting("home_lng", longitude);
     state.homeLocation = { lat: latitude, lng: longitude, radius: state.homeLocation?.radius || 100 };
-    alert("تم تحديد موقع البيت ✅");
     paint();
+    setLocStatus("✅ تم تحديد موقع البيت!");
     startLocationTracking();
   }, (err)=>{
     console.error("getCurrentPosition failed:", err);
-    alert(geoErrorMessage(err));
+    setLocStatus("❌ " + geoErrorMessage(err));
   }, { enableHighAccuracy: true, timeout: 30000, maximumAge: 0 });
 }
 
@@ -447,12 +457,21 @@ async function openMapPicker(){
   homeMapPickedLatLng = { lat: startLat, lng: startLng };
 
   setTimeout(()=>{
+    if(typeof L === "undefined"){
+      const mapDiv = document.getElementById("homeMapPicker");
+      if(mapDiv) mapDiv.innerHTML = `<div class="empty" style="padding:20px;">تعذّر تحميل الخريطة (مشكلة اتصال بالإنترنت). جرّب زر "📍 موقعي الحالي" بدالها، أو تأكد من الاتصال وجرّب كمان مرة.</div>`;
+      return;
+    }
     homeMapInstance = L.map("homeMapPicker").setView([startLat, startLng], 16);
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "© OpenStreetMap" }).addTo(homeMapInstance);
     homeMapMarker = L.marker([startLat, startLng], { draggable: true }).addTo(homeMapInstance);
     homeMapMarker.on("dragend", ()=>{ const p = homeMapMarker.getLatLng(); homeMapPickedLatLng = { lat: p.lat, lng: p.lng }; });
     homeMapInstance.on("click", (e)=>{ homeMapMarker.setLatLng(e.latlng); homeMapPickedLatLng = { lat: e.latlng.lat, lng: e.latlng.lng }; });
-  }, 50);
+    // Leaflet sometimes renders blank if the container's real size wasn't
+    // known at init time (common right after inserting into a fresh overlay) —
+    // forcing a resize recalculation after layout settles fixes that.
+    setTimeout(()=>{ if(homeMapInstance) homeMapInstance.invalidateSize(); }, 200);
+  }, 80);
 
   document.getElementById("cancelMapPick").onclick = ()=>{ overlay.remove(); homeMapInstance = null; };
   document.getElementById("saveMapPick").onclick = async ()=>{
@@ -737,6 +756,7 @@ function settingsHTML(){
         <button class="btn ghost" id="pickOnMapBtn" style="flex:1;">🗺️ من الخريطة</button>
       </div>
       <div class="set-row" style="margin-top:6px;"><span>نصف القطر (متر)</span><button id="editRadiusBtn">تعديل</button></div>
+      <p id="locStatusMsg" style="color:var(--brand);font-size:12px;font-weight:600;margin:8px 0 0;min-height:16px;"></p>
       <p style="color:var(--muted);font-size:11px;margin:8px 0 0;">⚠️ التتبّع بيشتغل بس لمّا التطبيق مفتوح (أو بالخلفية القريبة) عبراوزر الموبايل — مش تتبّع حقيقي بالخلفية لمّا التطبيق مسكّر تمامًا، هيدا قيد من أبل/غوغل على مواقع الويب مش شي فينا نتخطاه بدون تطبيق حقيقي (native).</p>
     </div>
     <div class="settings-block">
