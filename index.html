@@ -199,6 +199,11 @@ function notifVerbHTML(n){
   return tpl.replace("{name}", "<bdi>" + esc(n.homeapp_events.homeapp_members.name) + "</bdi>");
 }
 
+function isSystemEvent(ev){ return !ev.member_id; }
+function eventEmoji(ev){ return isSystemEvent(ev) ? (ev.system_emoji || "🔔") : ev.homeapp_action_types.emoji; }
+function eventTextPlain(ev){ return isSystemEvent(ev) ? (ev.system_text || "") : verbText(ev); }
+function eventTextHTML(ev){ return isSystemEvent(ev) ? esc(ev.system_text || "").replace(/\n/g, "<br>") : verbTextHTML(ev); }
+
 // ---------------- Data loading ----------------
 async function loadStatic(){
   const [members, actionTypes, settings] = await Promise.all([
@@ -213,16 +218,16 @@ async function loadStatic(){
 }
 
 async function loadEvents(){
-  const events = await sbGet("/homeapp_events?select=id,note,created_at,member_id,homeapp_members(id,name,emoji,color,gender),homeapp_action_types(id,emoji,label,verb_template,verb_template_f)&order=created_at.desc&limit=200");
+  const events = await sbGet("/homeapp_events?select=id,note,created_at,member_id,system_emoji,system_text,homeapp_members(id,name,emoji,color,gender),homeapp_action_types(id,emoji,label,verb_template,verb_template_f)&order=created_at.desc&limit=200");
   // detect new events from other people for notification/toast
   if(state.me){
     for(const ev of events){
       if(!state.seenEventIds.has(ev.id)){
         state.seenEventIds.add(ev.id);
         if(state.events.length && ev.member_id !== state.me.id){
-          showToast(ev.homeapp_action_types.emoji + " " + verbText(ev));
+          showToast(eventEmoji(ev) + " " + eventTextPlain(ev));
           if(window.Notification && Notification.permission === "granted"){
-            new Notification(state.familyName, { body: ev.homeapp_action_types.emoji + " " + verbText(ev) });
+            new Notification(state.familyName, { body: eventEmoji(ev) + " " + eventTextPlain(ev) });
           }
         }
       }
@@ -479,9 +484,9 @@ function homeHTML(){
 function feedItemHTML(ev){
   return `
     <div class="feed-item">
-      <div class="icon">${ev.homeapp_action_types.emoji}</div>
+      <div class="icon">${eventEmoji(ev)}</div>
       <div class="body">
-        <p class="txt">${verbTextHTML(ev)}</p>
+        <p class="txt">${eventTextHTML(ev)}</p>
         ${ev.note ? `<p class="note">"${esc(ev.note)}"</p>` : ""}
         <p class="time">${fmtTime(ev.created_at)}</p>
       </div>
@@ -492,9 +497,9 @@ function feedItemHTML(ev){
 function historyItemHTML(ev){
   return `
     <div class="feed-item">
-      <div class="icon">${ev.homeapp_action_types.emoji}</div>
+      <div class="icon">${eventEmoji(ev)}</div>
       <div class="body">
-        <p class="txt">${verbTextHTML(ev)}</p>
+        <p class="txt">${eventTextHTML(ev)}</p>
         ${ev.note ? `<p class="note">"${esc(ev.note)}"</p>` : ""}
         <p class="time">${fmtTime(ev.created_at)}</p>
       </div>
@@ -504,7 +509,7 @@ function historyItemHTML(ev){
 }
 
 function shareToWhatsApp(ev){
-  const text = ev.homeapp_action_types.emoji + " " + verbText(ev) + (ev.note ? ` ("${ev.note}")` : "") + " — " + fmtTime(ev.created_at);
+  const text = eventEmoji(ev) + " " + eventTextPlain(ev) + (ev.note ? ` ("${ev.note}")` : "") + " — " + fmtTime(ev.created_at);
   window.open("https://wa.me/?text=" + encodeURIComponent(text), "_blank");
 }
 
