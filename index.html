@@ -518,7 +518,20 @@ async function openMapPicker(){
       return;
     }
     homeMapInstance = L.map("homeMapPicker").setView([startLat, startLng], 16);
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "© OpenStreetMap" }).addTo(homeMapInstance);
+    let osmTileErrors = 0;
+    let switchedProvider = false;
+    const osmLayer = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "© OpenStreetMap" }).addTo(homeMapInstance);
+    osmLayer.on("tileerror", ()=>{
+      osmTileErrors++;
+      if(osmTileErrors >= 3 && !switchedProvider){
+        switchedProvider = true;
+        homeMapInstance.removeLayer(osmLayer);
+        L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
+          attribution: "© OpenStreetMap © CARTO",
+          subdomains: "abcd"
+        }).addTo(homeMapInstance);
+      }
+    });
     homeMapMarker = L.marker([startLat, startLng], { draggable: true }).addTo(homeMapInstance);
     homeMapMarker.on("dragend", ()=>{ const p = homeMapMarker.getLatLng(); homeMapPickedLatLng = { lat: p.lat, lng: p.lng }; });
     homeMapInstance.on("click", (e)=>{ homeMapMarker.setLatLng(e.latlng); homeMapPickedLatLng = { lat: e.latlng.lat, lng: e.latlng.lng }; });
