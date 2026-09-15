@@ -658,6 +658,7 @@ async function performAction(actionType, note){
   }catch(e){
     console.error(e);
     alert("Couldn't post this action. Details: " + (e.message || e));
+    throw e;
   }
 }
 
@@ -971,6 +972,7 @@ function renderActionSheet(){
       <h3>${at.emoji} ${esc(at.label)}</h3>
       <p class="sub">Add an optional note</p>
       <textarea id="noteInput" placeholder="e.g. Pizza from Domino's"></textarea>
+      <p id="actionSheetStatus" style="color:var(--brand);font-size:12px;font-weight:600;margin:6px 0 0;min-height:16px;"></p>
       <div class="row">
         <button class="btn ghost" id="cancelNote">Skip</button>
         <button class="btn primary" id="saveNote">Post</button>
@@ -978,14 +980,33 @@ function renderActionSheet(){
     </div>
   `;
   document.body.appendChild(overlay);
-  document.getElementById("cancelNote").onclick = async ()=>{
-    overlay.remove(); state.pendingAction = null;
-    await performAction(at, null);
-  };
-  document.getElementById("saveNote").onclick = async ()=>{
+
+  const statusEl = () => document.getElementById("actionSheetStatus");
+  const skipBtn = () => document.getElementById("cancelNote");
+  const postBtn = () => document.getElementById("saveNote");
+
+  async function submit(note){
+    skipBtn().disabled = true;
+    postBtn().disabled = true;
+    postBtn().textContent = "⏳ عم ننشر...";
+    if(statusEl()) statusEl().textContent = "";
+    try{
+      await performAction(at, note || null);
+      state.pendingAction = null;
+      overlay.remove();
+    }catch(e){
+      console.error("Post from note sheet failed:", e);
+      postBtn().disabled = false;
+      skipBtn().disabled = false;
+      postBtn().textContent = "Post";
+      if(statusEl()) statusEl().textContent = "❌ ما نجحنا ننشر: " + (e.message || e);
+    }
+  }
+
+  document.getElementById("cancelNote").onclick = ()=> submit(null);
+  document.getElementById("saveNote").onclick = ()=>{
     const note = document.getElementById("noteInput").value.trim();
-    overlay.remove(); state.pendingAction = null;
-    await performAction(at, note || null);
+    submit(note);
   };
 }
 
