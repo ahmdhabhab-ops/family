@@ -543,13 +543,28 @@ async function openMapPicker(){
 
   document.getElementById("cancelMapPick").onclick = ()=>{ overlay.remove(); homeMapInstance = null; };
   document.getElementById("saveMapPick").onclick = async ()=>{
-    await upsertSetting("home_lat", homeMapPickedLatLng.lat);
-    await upsertSetting("home_lng", homeMapPickedLatLng.lng);
-    state.homeLocation = { lat: homeMapPickedLatLng.lat, lng: homeMapPickedLatLng.lng, radius: state.homeLocation?.radius || 100 };
-    overlay.remove();
-    homeMapInstance = null;
-    paint();
-    startLocationTracking();
+    const saveBtn = document.getElementById("saveMapPick");
+    if(!homeMapPickedLatLng){
+      alert("ما تحدد مكان عالخريطة لسا. دوس عالخريطة أول شي.");
+      return;
+    }
+    saveBtn.textContent = "⏳ عم نحفظ...";
+    saveBtn.disabled = true;
+    try{
+      await upsertSetting("home_lat", homeMapPickedLatLng.lat);
+      await upsertSetting("home_lng", homeMapPickedLatLng.lng);
+      state.homeLocation = { lat: homeMapPickedLatLng.lat, lng: homeMapPickedLatLng.lng, radius: state.homeLocation?.radius || 100 };
+      overlay.remove();
+      homeMapInstance = null;
+      paint();
+      setLocStatus("✅ تم تحديد موقع البيت من الخريطة!");
+      startLocationTracking();
+    }catch(e){
+      console.error("Saving map-picked location failed:", e);
+      saveBtn.textContent = "حفظ";
+      saveBtn.disabled = false;
+      alert("ما قدرنا نحفظ الموقع: " + (e.message || e));
+    }
   };
 }
 
