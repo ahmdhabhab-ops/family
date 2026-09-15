@@ -64,6 +64,14 @@
   .feed-item .note{font-size:13px;color:var(--muted);margin:4px 0 0;}
   .feed-item .time{font-size:12px;color:var(--muted);margin:4px 0 0;}
   .share-btn{background:#E7F9EF;color:#128C4A;border:none;border-radius:10px;padding:6px 10px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;align-self:flex-start;}
+  .poll-block{background:#F1EEFF;border-radius:12px;padding:10px 12px;margin-top:8px;}
+  .poll-q{font-size:12px;font-weight:700;color:var(--brand);margin:0 0 6px;}
+  .poll-responses{display:flex;flex-direction:column;gap:3px;margin-bottom:8px;}
+  .poll-r{font-size:12px;color:var(--text);}
+  .poll-r b{font-weight:700;}
+  .poll-reply-row{display:flex;gap:6px;}
+  .poll-input{flex:1;border:1px solid #DCD6FA;border-radius:10px;padding:7px 10px;font-size:12px;font-family:inherit;}
+  .poll-send-btn{background:var(--brand);color:white;border:none;border-radius:10px;padding:7px 12px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;}
   .empty{text-align:center;color:var(--muted);padding:40px 20px;font-size:14px;}
 
   /* ---------- Quick actions ---------- */
@@ -185,7 +193,8 @@ const state = {
   historyFilter: { range: "today", person: "all", type: "all" },
   pendingAction: null, // action type awaiting a note
   homeLocation: null,  // { lat, lng, radius }
-  watchId: null
+  watchId: null,
+  polls: {}            // event_id -> poll { id, question, homeapp_poll_responses }
 };
 
 const root = document.getElementById("app");
@@ -223,6 +232,47 @@ function verbTextHTML(ev){
 function notifVerbHTML(n){
   const tpl = pickTemplate(n.homeapp_events.homeapp_action_types, n.homeapp_events.homeapp_members);
   return tpl.replace("{name}", "<bdi>" + esc(n.homeapp_events.homeapp_members.name) + "</bdi>");
+}
+
+function pollBlockHTML(ev){
+  const poll = state.polls[ev.id];
+  if(!poll) return "";
+  const responses = poll.homeapp_poll_responses || [];
+  const mine = state.me ? responses.find(r => r.member_id === state.me.id) : null;
+  return `
+    <div class="poll-block">
+      ${responses.length ? `<div class="poll-responses">${responses.map(r => `<div class="poll-r"><bdi><b>${esc(r.homeapp_members.name)}</b></bdi>: ${esc(r.response)}</div>`).join("")}</div>` : `<div class="poll-responses"><div class="poll-r" style="color:var(--muted);">ما حدا جاوب لسا</div></div>`}
+      <div class="poll-reply-row">
+        <input type="text" class="poll-input" data-poll-input="${poll.id}" placeholder="${mine ? 'عدّل جوابك...' : 'اكتب جوابك...'}" value="${mine ? esc(mine.response) : ''}" />
+        <button class="poll-send-btn" data-poll-send="${poll.id}">إرسال</button>
+      </div>
+    </div>
+  `;
+}
+
+async function submitPollResponse(pollId, text){
+  if(!text || !text.trim() || !state.me) return;
+  const val = text.trim();
+  try{
+    await sbPost("/homeapp_poll_responses?on_conflict=poll_id,member_id", [{ poll_id: pollId, member_id: state.me.id, response: val }])
+      .catch(async ()=>{
+        await sbPatch("/homeapp_poll_responses?poll_id=eq."+pollId+"&member_id=eq."+state.me.id, { response: val });
+      });
+    await refreshAll();
+  }catch(e){
+    console.error("submitPollResponse failed:", e);
+    alert("ما قدرنا نبعت جوابك: " + (e.message || e));
+  }
+}
+
+function wirePollButtons(container){
+  container.querySelectorAll("[data-poll-send]").forEach(btn=>{
+    btn.addEventListener("click", ()=>{
+      const pollId = btn.dataset.pollSend;
+      const input = container.querySelector('[data-poll-input="'+pollId+'"]');
+      if(input) submitPollResponse(pollId, input.value);
+    });
+  });
 }
 
 function isSystemEvent(ev){ return !ev.member_id; }
@@ -273,10 +323,18 @@ async function loadUnread(){
   state.unread = await sbGet("/homeapp_notifications?recipient_member_id=eq."+state.me.id+"&is_read=eq.false&select=id,created_at,homeapp_events(id,note,created_at,homeapp_members(name,emoji,gender),homeapp_action_types(emoji,label,verb_template,verb_template_f))&order=created_at.desc");
 }
 
+async function loadPolls(){
+  const polls = await sbGet("/homeapp_polls?select=id,event_id,question,created_at,homeapp_poll_responses(member_id,response,homeapp_members(name,emoji,gender))&order=created_at.desc&limit=50");
+  const map = {};
+  polls.forEach(p => { map[p.event_id] = p; });
+  state.polls = map;
+}
+
 async function refreshAll(render=true){
   try{
     await loadEvents();
     await loadUnread();
+    await loadPolls();
     if(render) paint();
   }catch(e){ console.error(e); }
 }
@@ -586,6 +644,10 @@ async function performAction(actionType, note){
   try{
     const created = await sbPost("/homeapp_events", { member_id: state.me.id, action_type_id: actionType.id, note: note || null });
     const ev = created[0];
+    if(actionType.creates_poll){
+      const question = pickTemplate(actionType, state.me).replace("{name}", state.me.name);
+      await sbPost("/homeapp_polls", { event_id: ev.id, question });
+    }
     const others = state.members.filter(m => m.id !== state.me.id);
     if(others.length){
       await sbPost("/homeapp_notifications", others.map(m => ({ event_id: ev.id, recipient_member_id: m.id })));
@@ -753,6 +815,7 @@ function renderApp(){
   else if(state.tab === "history") content.innerHTML = historyHTML();
   else content.innerHTML = settingsHTML();
 
+  wirePollButtons(content);
   wireTabEvents();
 }
 
@@ -774,27 +837,33 @@ function homeHTML(){
 
 function feedItemHTML(ev){
   return `
-    <div class="feed-item">
-      <div class="icon">${eventEmoji(ev)}</div>
-      <div class="body">
-        <p class="txt">${eventTextHTML(ev)}</p>
-        ${ev.note ? `<p class="note">"${esc(ev.note)}"</p>` : ""}
-        <p class="time">${fmtTime(ev.created_at)}</p>
+    <div class="feed-item" style="flex-direction:column;">
+      <div style="display:flex;gap:12px;align-items:flex-start;width:100%;">
+        <div class="icon">${eventEmoji(ev)}</div>
+        <div class="body">
+          <p class="txt">${eventTextHTML(ev)}</p>
+          ${ev.note ? `<p class="note">"${esc(ev.note)}"</p>` : ""}
+          <p class="time">${fmtTime(ev.created_at)}</p>
+        </div>
       </div>
+      ${pollBlockHTML(ev)}
     </div>
   `;
 }
 
 function historyItemHTML(ev){
   return `
-    <div class="feed-item">
-      <div class="icon">${eventEmoji(ev)}</div>
-      <div class="body">
-        <p class="txt">${eventTextHTML(ev)}</p>
-        ${ev.note ? `<p class="note">"${esc(ev.note)}"</p>` : ""}
-        <p class="time">${fmtTime(ev.created_at)}</p>
+    <div class="feed-item" style="flex-direction:column;">
+      <div style="display:flex;gap:12px;align-items:flex-start;width:100%;">
+        <div class="icon">${eventEmoji(ev)}</div>
+        <div class="body">
+          <p class="txt">${eventTextHTML(ev)}</p>
+          ${ev.note ? `<p class="note">"${esc(ev.note)}"</p>` : ""}
+          <p class="time">${fmtTime(ev.created_at)}</p>
+        </div>
+        <button class="share-btn" data-share="${ev.id}">📤 مشاركة</button>
       </div>
-      <button class="share-btn" data-share="${ev.id}">📤 مشاركة</button>
+      ${pollBlockHTML(ev)}
     </div>
   `;
 }
