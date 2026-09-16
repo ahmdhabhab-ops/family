@@ -406,11 +406,21 @@ function distMeters(lat1, lng1, lat2, lng2){
 async function onPositionUpdate(pos){
   if(!state.me || !state.homeLocation) return;
   const { latitude, longitude, accuracy } = pos.coords;
+  state.lastGpsAccuracy = accuracy;
+
+  // A reading this imprecise (e.g. WiFi/cell-tower estimate instead of a
+  // real GPS fix) can't reliably tell "home" from "away" — skip acting on
+  // it rather than flip the status based on noise.
+  if(accuracy && accuracy > 300){
+    state.lastDistanceFromHome = distMeters(latitude, longitude, state.homeLocation.lat, state.homeLocation.lng);
+    if(state.tab === "settings") paint();
+    return;
+  }
+
   const d = distMeters(latitude, longitude, state.homeLocation.lat, state.homeLocation.lng);
   const nowHome = d <= state.homeLocation.radius;
   const wasHome = state.me.is_home;
   state.lastDistanceFromHome = d;
-  state.lastGpsAccuracy = accuracy;
 
   await sbPost("/homeapp_member_location?on_conflict=member_id", [{ member_id: state.me.id, lat: latitude, lng: longitude, updated_at: new Date().toISOString() }])
     .catch(()=> sbPatch("/homeapp_member_location?member_id=eq."+state.me.id, { lat: latitude, lng: longitude, updated_at: new Date().toISOString() }));
@@ -432,7 +442,7 @@ function startLocationTracking(){
   state.watchId = navigator.geolocation.watchPosition(
     onPositionUpdate,
     (err)=> console.error("Geolocation error:", err),
-    { enableHighAccuracy: false, maximumAge: 30000, timeout: 25000 }
+    { enableHighAccuracy: true, maximumAge: 15000, timeout: 25000 }
   );
 }
 
@@ -1034,7 +1044,10 @@ function settingsHTML(){
       <div class="set-row" style="margin-top:6px;"><span>نصف القطر (متر)</span><button id="editRadiusBtn">تعديل</button></div>
       ${state.lastDistanceFromHome !== null ? `
         <div class="set-row"><span>مسافتك الحالية عن البيت</span><span style="font-weight:700;color:${state.lastDistanceFromHome <= (state.homeLocation?.radius||100) ? '#22C55E' : '#FF4D4F'};">${Math.round(state.lastDistanceFromHome)}م</span></div>
-        <p style="color:var(--muted);font-size:11px;margin:4px 0 0;">دقّة الـ GPS الحالية: ±${state.lastGpsAccuracy ? Math.round(state.lastGpsAccuracy) : "؟"}م. إذا المسافة كبيرة رغم إنك بالبيت، جرّب "📍 موقعي الحالي" وإنت واقف بنفس المكان — أو كبّر نصف القطر.</p>
+        ${state.lastGpsAccuracy && state.lastGpsAccuracy > 300
+          ? `<p style="color:#FF4D4F;font-size:11px;font-weight:600;margin:4px 0 0;">⚠️ دقّة الـ GPS ضعيفة جدًا حاليًا (±${Math.round(state.lastGpsAccuracy)}م) — عم نتجاهل هالقراءة وما عم نحدّث حالتك لحتى توصل قراءة أدق. جرّب قرب شبّاك أو شغّل High Accuracy من إعدادات الموقع.</p>`
+          : `<p style="color:var(--muted);font-size:11px;margin:4px 0 0;">دقّة الـ GPS الحالية: ±${state.lastGpsAccuracy ? Math.round(state.lastGpsAccuracy) : "؟"}م.</p>`
+        }
       ` : ""}
       <p id="locStatusMsg" style="color:var(--brand);font-size:12px;font-weight:600;margin:8px 0 0;min-height:16px;"></p>
       <p style="color:var(--muted);font-size:11px;margin:8px 0 0;">⚠️ التتبّع بيشتغل بس لمّا التطبيق مفتوح (أو بالخلفية القريبة) عبراوزر الموبايل — مش تتبّع حقيقي بالخلفية لمّا التطبيق مسكّر تمامًا، هيدا قيد من أبل/غوغل على مواقع الويب مش شي فينا نتخطاه بدون تطبيق حقيقي (native).</p>
