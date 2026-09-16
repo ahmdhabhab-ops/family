@@ -118,6 +118,18 @@
   .switch.on .knob{left:21px;}
   input.txtinput{border:1px solid #E5E1FA;border-radius:10px;padding:8px 10px;font-size:13px;font-family:inherit;}
   .pin-input{width:100%;text-align:center;font-size:24px;letter-spacing:10px;border:1px solid #E5E1FA;border-radius:12px;padding:12px;font-family:inherit;box-sizing:border-box;}
+  /* ---------- PIN entry (auto-submit dots) ---------- */
+  .pin-back{position:absolute;top:20px;inset-inline-start:20px;background:rgba(255,255,255,0.15);border:none;color:white;padding:8px 14px;border-radius:12px;font-weight:600;font-size:13px;cursor:pointer;}
+  .pin-dots-wrap{position:relative;}
+  .pin-dots{display:flex;gap:18px;justify-content:center;}
+  .pin-dot{width:16px;height:16px;border-radius:50%;border:2px solid rgba(255,255,255,0.6);background:transparent;transition:background .1s;}
+  .pin-dot.filled{background:white;border-color:white;}
+  .pin-dots-dark .pin-dot{border-color:#DCD6FA;}
+  .pin-dots-dark .pin-dot.filled{background:var(--brand);border-color:var(--brand);}
+  .pin-dots.shake{animation:pinshake .4s;}
+  @keyframes pinshake{10%,90%{transform:translateX(-2px);}20%,80%{transform:translateX(4px);}30%,50%,70%{transform:translateX(-8px);}40%,60%{transform:translateX(8px);}}
+  .pin-hidden-input{position:absolute;inset:-14px;opacity:0;font-size:16px;border:none;padding:0;}
+  .pin-error{color:#FFD3D3;font-size:12px;font-weight:600;min-height:16px;margin:16px 0 0;opacity:.95;text-align:center;}
   #liveMap{width:100%;height:320px;border-radius:16px;overflow:hidden;background:#eee;}
   .live-map-legend{display:flex;flex-direction:column;gap:8px;padding:0 18px;margin-top:12px;}
   .live-map-row{background:var(--card);border-radius:14px;padding:10px 14px;box-shadow:var(--shadow);display:flex;align-items:center;gap:10px;font-size:14px;font-weight:600;}
@@ -310,7 +322,10 @@ async function loadStatic(){
 }
 
 async function loadEvents(){
-  const events = await sbGet("/homeapp_events?select=id,note,created_at,member_id,system_emoji,system_text,homeapp_members(id,name,emoji,color,gender),homeapp_action_types(id,emoji,label,verb_template,verb_template_f)&order=created_at.desc&limit=200");
+  const raw = await sbGet("/homeapp_events?select=id,note,created_at,member_id,system_emoji,system_text,hidden_from_member_id,homeapp_members!homeapp_events_member_id_fkey(id,name,emoji,color,gender),homeapp_action_types(id,emoji,label,verb_template,verb_template_f)&order=created_at.desc&limit=200");
+  // A birthday gift-poll event is hidden from the one person it's about, so
+  // the surprise doesn't spoil for them — everyone else sees it normally.
+  const events = state.me ? raw.filter(ev => ev.hidden_from_member_id !== state.me.id) : raw;
   // detect new events from other people for notification/toast
   if(state.me){
     for(const ev of events){
@@ -332,7 +347,7 @@ async function loadEvents(){
 
 async function loadUnread(){
   if(!state.me) return;
-  state.unread = await sbGet("/homeapp_notifications?recipient_member_id=eq."+state.me.id+"&is_read=eq.false&select=id,created_at,homeapp_events(id,note,created_at,homeapp_members(name,emoji,gender),homeapp_action_types(emoji,label,verb_template,verb_template_f))&order=created_at.desc");
+  state.unread = await sbGet("/homeapp_notifications?recipient_member_id=eq."+state.me.id+"&is_read=eq.false&select=id,created_at,homeapp_events(id,note,created_at,homeapp_members!homeapp_events_member_id_fkey(name,emoji,gender),homeapp_action_types(emoji,label,verb_template,verb_template_f))&order=created_at.desc");
 }
 
 async function loadPolls(){
@@ -346,8 +361,68 @@ async function loadMemberLocations(){
   state.memberLocations = await sbGet("/homeapp_member_location?select=member_id,lat,lng,updated_at,homeapp_members(name,emoji,location_sharing)");
 }
 
+// ---------------- Birthdays ----------------
+// How many days from today until this member's next birthday (0 = today),
+// ignoring the year stored in birthday and wrapping to next year once
+// this year's date has passed.
+function daysUntilNextBirthday(birthdayStr){
+  const [, mo, d] = birthdayStr.split("-").map(Number);
+  const today = new Date(); today.setHours(0,0,0,0);
+  let next = new Date(today.getFullYear(), mo - 1, d);
+  if(next < today) next = new Date(today.getFullYear() + 1, mo - 1, d);
+  return Math.round((next - today) / 86400000);
+}
+
+// Runs on every refresh. Two things happen automatically, each guarded by
+// a "claimed this year already?" column so repeated checks (every 2.5s,
+// from every logged-in device) don't create duplicates:
+//  - 7 days out: a hidden-from-them gift poll goes to everyone else.
+//  - on the day: a happy-birthday post goes to everyone, them included.
+async function checkBirthdays(){
+  if(!state.me || !state.members.length) return;
+  const year = new Date().getFullYear();
+  for(const m of state.members){
+    if(!m.birthday) continue;
+    const days = daysUntilNextBirthday(m.birthday);
+    if(days === 7 && m.birthday_gift_poll_year !== year){
+      await tryClaimBirthdayMilestone(m, "birthday_gift_poll_year", year, async () => {
+        const text = `🎁 عيد ميلاد ${m.name} بعد أسبوع بالضبط! شو رح ${m.gender === "f" ? "تجيبولها" : "تجيبوله"} هدية؟`;
+        const ev = (await sbPost("/homeapp_events", { system_emoji: "🎁", system_text: text, hidden_from_member_id: m.id }))[0];
+        await sbPost("/homeapp_polls", { event_id: ev.id, question: `شو رح تجيبوا هدية لـ ${m.name}؟` });
+        const others = state.members.filter(mm => mm.id !== m.id);
+        if(others.length){
+          await sbPost("/homeapp_notifications", others.map(o => ({ event_id: ev.id, recipient_member_id: o.id })));
+          sendPush(state.familyName, text, others.map(o => o.id));
+        }
+      });
+    } else if(days === 0 && m.birthday_wish_year !== year){
+      await tryClaimBirthdayMilestone(m, "birthday_wish_year", year, async () => {
+        const text = `🎉 عيد ميلاد سعيد يا ${m.name}! 🎂`;
+        const ev = (await sbPost("/homeapp_events", { system_emoji: "🎉", system_text: text }))[0];
+        await sbPost("/homeapp_notifications", state.members.map(o => ({ event_id: ev.id, recipient_member_id: o.id })));
+        sendPush(state.familyName, text, state.members.map(o => o.id));
+      });
+    }
+  }
+}
+
+// Atomically flips `column` to `year` on member `m` only if it isn't
+// already set to `year` — PostgREST returns the updated row only when the
+// filter matched, so an empty result means another device already claimed
+// this milestone and `action` must not run again.
+async function tryClaimBirthdayMilestone(m, column, year, action){
+  try{
+    const claimed = await sbPatch(
+      "/homeapp_members?id=eq." + m.id + "&or=(" + column + ".is.null," + column + ".neq." + year + ")",
+      { [column]: year }
+    );
+    if(claimed.length) await action();
+  }catch(e){ console.error("checkBirthdays: failed for " + m.name + ":", e); }
+}
+
 async function refreshAll(render=true){
   try{
+    await checkBirthdays();
     await loadEvents();
     await loadUnread();
     await loadPolls();
@@ -807,6 +882,20 @@ async function renameFamily(){
   paint();
 }
 
+async function setBirthday(){
+  const current = state.me.birthday || "";
+  const input = prompt("تاريخ عيد ميلادك (YYYY-MM-DD):", current);
+  if(input === null) return;
+  const value = input.trim();
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(value) || isNaN(new Date(value + "T00:00").getTime())){
+    alert("لازم تدخل تاريخ صحيح بصيغة YYYY-MM-DD، متلاً 1990-05-20.");
+    return;
+  }
+  await sbPatch("/homeapp_members?id=eq."+state.me.id, { birthday: value });
+  state.me.birthday = value;
+  paint();
+}
+
 function toggleNotifPermission(){
   if(!window.Notification){ alert("Notifications aren't supported in this browser/device."); return; }
   if(Notification.permission === "denied"){
@@ -836,96 +925,231 @@ async function sha256Hex(text){
   return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
 }
 
-function openPinModal(mode, member){
+function loginAs(member){
+  state.me = member;
+  refreshAll();
+  ensurePushSubscription();
+  startLocationTracking();
+}
+
+// ---- Reusable 4-digit PIN dots input, shared by login, setup, the member
+// switcher, and the change-PIN flow. Auto-submits the instant the 4th
+// digit lands — no Enter key or submit button anywhere in this flow. ----
+function pinDotsHTML(prefix){
+  return `
+    <div class="pin-dots-wrap">
+      <div class="pin-dots" id="${prefix}Dots">
+        ${[0, 1, 2, 3].map(i => `<span class="pin-dot" data-i="${i}"></span>`).join("")}
+      </div>
+      <input id="${prefix}Input" class="pin-hidden-input" type="tel" inputmode="numeric" pattern="[0-9]*" autocomplete="off" maxlength="4" />
+    </div>`;
+}
+
+// Wires the dots+hidden-input pair rendered by pinDotsHTML(prefix). Calls
+// onComplete(pin, { reject, shake }) every time 4 digits land; onComplete
+// decides whether that was right (leave it) or wrong (call reject() to
+// shake and clear back to an empty, focused input for another attempt).
+function wirePinDots(prefix, onComplete){
+  const dotsEl = document.getElementById(prefix + "Dots");
+  const input = document.getElementById(prefix + "Input");
+  let value = "";
+  let busy = false;
+  function renderDots(){
+    dotsEl.querySelectorAll(".pin-dot").forEach((d, i) => d.classList.toggle("filled", i < value.length));
+  }
+  function shake(cb){
+    dotsEl.classList.add("shake");
+    setTimeout(() => { dotsEl.classList.remove("shake"); if(cb) cb(); }, 400);
+  }
+  function reject(){
+    shake(() => {
+      value = "";
+      input.value = "";
+      renderDots();
+      busy = false;
+      input.focus();
+    });
+  }
+  input.addEventListener("input", async () => {
+    if(busy) return;
+    value = input.value.replace(/\D/g, "").slice(0, 4);
+    input.value = value;
+    renderDots();
+    if(value.length === 4){
+      busy = true;
+      await onComplete(value, { reject, shake });
+    }
+  });
+  input.focus();
+  return { focus: () => input.focus() };
+}
+
+// Modal PIN check reused by the member switcher and the "confirm current
+// PIN" step of changing a PIN. Resolves true once `member`'s PIN is
+// entered correctly, or false if the user cancels.
+function promptForPin(member, { title = "Enter PIN", subtitle = "" } = {}){
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "overlay";
+    overlay.innerHTML = `
+      <div class="sheet" style="text-align:center;">
+        <h3>${title}</h3>
+        ${subtitle ? `<p class="sub">${subtitle}</p>` : ""}
+        <div style="display:flex;justify-content:center;margin:18px 0 6px;">
+          ${pinDotsHTML("prompt")}
+        </div>
+        <p class="pin-error" id="promptPinError" style="color:#D64545;"></p>
+        <div class="row"><button class="btn ghost" id="promptPinCancel">إلغاء</button></div>
+      </div>`;
+    document.body.appendChild(overlay);
+    document.getElementById("promptDots").classList.add("pin-dots-dark");
+    document.getElementById("promptPinCancel").addEventListener("click", () => { overlay.remove(); resolve(false); });
+    const errEl = document.getElementById("promptPinError");
+    wirePinDots("prompt", async (pin, { reject }) => {
+      errEl.textContent = "";
+      const hash = await sha256Hex(pin);
+      if(hash === member.pin_hash){
+        overlay.remove();
+        resolve(true);
+      } else {
+        errEl.textContent = "❌ PIN غلط";
+        reject();
+      }
+    });
+  });
+}
+
+// Existing member, existing PIN — full-screen entry, auto-submits on the
+// 4th digit.
+function renderPinEntry(member){
+  root.innerHTML = `
+    <div class="login">
+      <button class="pin-back" id="pinBack">‹ رجوع</button>
+      <span class="em" style="font-size:48px;display:block;margin-bottom:4px;">${member.emoji}</span>
+      <h1 style="font-size:22px;"><bdi>${esc(member.name)}</bdi></h1>
+      <p>دخّل الـ PIN تبعك</p>
+      ${pinDotsHTML("pin")}
+      <p class="pin-error" id="pinError"></p>
+    </div>`;
+
+  const errEl = document.getElementById("pinError");
+  document.getElementById("pinBack").addEventListener("click", (e) => { e.stopPropagation(); renderLogin(); });
+
+  wirePinDots("pin", async (pin, { reject }) => {
+    errEl.textContent = "";
+    const hash = await sha256Hex(pin);
+    if(hash === member.pin_hash){
+      loginAs(member);
+    } else {
+      errEl.textContent = "❌ رقم سري غلط، جرّب كمان مرة";
+      reject();
+    }
+  });
+}
+
+// First time this member logs in — a PIN is mandatory (nobody gets into
+// anyone's account without one), so this asks for it twice: once to pick
+// it, once to confirm. Each 4-digit entry auto-submits on its own.
+function renderPinSetup(member, firstEntry = "", error = ""){
+  const confirming = firstEntry !== "";
+  root.innerHTML = `
+    <div class="login">
+      <button class="pin-back" id="pinBack">‹ رجوع</button>
+      <span class="em" style="font-size:48px;display:block;margin-bottom:4px;">${member.emoji}</span>
+      <h1 style="font-size:22px;"><bdi>${esc(member.name)}</bdi></h1>
+      <p>${confirming ? "أكّد الـ PIN" : "أول مرة؟ حدد PIN من 4 أرقام"}</p>
+      ${pinDotsHTML("pin")}
+      <p class="pin-error" id="pinError">${esc(error)}</p>
+    </div>`;
+
+  document.getElementById("pinBack").addEventListener("click", (e) => { e.stopPropagation(); renderLogin(); });
+
+  wirePinDots("pin", async (pin, { reject }) => {
+    if(!confirming){
+      renderPinSetup(member, pin);
+      return;
+    }
+    if(pin !== firstEntry){
+      renderPinSetup(member, "", "الرقمين مش متطابقين، جرّب من جديد");
+      return;
+    }
+    try{
+      const hash = await sha256Hex(pin);
+      await sbPatch("/homeapp_members?id=eq." + member.id, { pin_hash: hash });
+      member.pin_hash = hash;
+      loginAs(member);
+    } catch(e){
+      reject();
+      document.getElementById("pinError").textContent = "ما نجحنا نحفظ الرقم: " + (e.message || e);
+    }
+  });
+}
+
+// Switching into another member's session from the top-bar chips needs
+// their PIN too — otherwise anyone holding the phone could hop into any
+// profile without ever going back through the login screen.
+async function switchToMember(member){
+  if(!member || member.id === state.me.id) return;
+  if(member.pin_hash){
+    const ok = await promptForPin(member, { title: `دخّل PIN ${esc(member.name)}`, subtitle: `${member.emoji} ${esc(member.name)}` });
+    if(!ok) return;
+  }
+  stopLocationTracking();
+  state.me = member;
+  refreshAll();
+  startLocationTracking();
+}
+
+// ---- Set / change a member's own PIN, from Settings ----
+async function openChangePinFlow(member){
+  if(member.pin_hash){
+    const ok = await promptForPin(member, { title: "أكّد الـ PIN الحالي" });
+    if(!ok) return;
+  }
+  renderNewPinStep(member, "");
+}
+
+function renderNewPinStep(member, firstEntry){
+  const confirming = firstEntry !== "";
   const overlay = document.createElement("div");
   overlay.className = "overlay";
-  let bodyHtml;
-  if(mode === "login"){
-    bodyHtml = `
-      <h3>🔒 ${member.emoji} <bdi>${esc(member.name)}</bdi></h3>
-      <p class="sub">دخّل الـ PIN تبعك (4 أرقام)</p>
-      <input type="password" inputmode="numeric" maxlength="4" id="pinInput" class="pin-input" placeholder="••••" />
-      <p id="pinError" style="color:#FF4D4F;font-size:12px;min-height:16px;margin:6px 0 0;"></p>
-      <div class="row"><button class="btn ghost" id="pinCancel">إلغاء</button><button class="btn primary" id="pinSubmit">دخول</button></div>
-    `;
-  } else if(mode === "setup"){
-    bodyHtml = `
-      <h3>🔒 ${member.emoji} <bdi>${esc(member.name)}</bdi></h3>
-      <p class="sub">أول مرة؟ حدد PIN من 4 أرقام لحسابك</p>
-      <input type="password" inputmode="numeric" maxlength="4" id="pinInput" class="pin-input" placeholder="PIN جديد" />
-      <input type="password" inputmode="numeric" maxlength="4" id="pinConfirm" class="pin-input" placeholder="أكّد الـ PIN" style="margin-top:8px;" />
-      <p id="pinError" style="color:#FF4D4F;font-size:12px;min-height:16px;margin:6px 0 0;"></p>
-      <div class="row"><button class="btn ghost" id="pinCancel">إلغاء</button><button class="btn primary" id="pinSubmit">حفظ ودخول</button></div>
-    `;
-  } else {
-    bodyHtml = `
-      <h3>🔒 غيّر الـ PIN تبعك</h3>
-      <p class="sub">دخّل الـ PIN الحالي</p>
-      <input type="password" inputmode="numeric" maxlength="4" id="pinOld" class="pin-input" placeholder="PIN الحالي" />
-      <input type="password" inputmode="numeric" maxlength="4" id="pinInput" class="pin-input" placeholder="PIN جديد" style="margin-top:8px;" />
-      <input type="password" inputmode="numeric" maxlength="4" id="pinConfirm" class="pin-input" placeholder="أكّد الـ PIN الجديد" style="margin-top:8px;" />
-      <p id="pinError" style="color:#FF4D4F;font-size:12px;min-height:16px;margin:6px 0 0;"></p>
-      <div class="row"><button class="btn ghost" id="pinCancel">إلغاء</button><button class="btn primary" id="pinSubmit">حفظ</button></div>
-    `;
-  }
-  overlay.innerHTML = `<div class="sheet">${bodyHtml}</div>`;
+  overlay.innerHTML = `
+    <div class="sheet" style="text-align:center;">
+      <h3>${confirming ? "أكّد الـ PIN الجديد" : "اختار PIN جديد"}</h3>
+      <div style="display:flex;justify-content:center;margin:18px 0 6px;">
+        ${pinDotsHTML("newpin")}
+      </div>
+      <p class="pin-error" id="newPinError" style="color:#D64545;"></p>
+      <div class="row"><button class="btn ghost" id="newPinCancel">إلغاء</button></div>
+    </div>`;
   document.body.appendChild(overlay);
+  document.getElementById("newpinDots").classList.add("pin-dots-dark");
+  document.getElementById("newPinCancel").addEventListener("click", () => overlay.remove());
+  const errEl = document.getElementById("newPinError");
 
-  document.getElementById("pinCancel").onclick = ()=> overlay.remove();
-  document.getElementById("pinSubmit").onclick = async ()=>{
-    const errEl = document.getElementById("pinError");
-    const submitBtn = document.getElementById("pinSubmit");
-    try{
-      if(mode === "login"){
-        const pin = document.getElementById("pinInput").value.trim();
-        if(!/^\d{4}$/.test(pin)){ errEl.textContent = "لازم 4 أرقام."; return; }
-        submitBtn.disabled = true; submitBtn.textContent = "⏳...";
-        const hash = await sha256Hex(pin);
-        if(hash !== member.pin_hash){
-          errEl.textContent = "❌ PIN غلط.";
-          submitBtn.disabled = false; submitBtn.textContent = "دخول";
-          return;
-        }
-        overlay.remove();
-        state.me = member;
-        await refreshAll();
-        ensurePushSubscription();
-        startLocationTracking();
-      } else if(mode === "setup"){
-        const pin = document.getElementById("pinInput").value.trim();
-        const confirmPin = document.getElementById("pinConfirm").value.trim();
-        if(!/^\d{4}$/.test(pin)){ errEl.textContent = "لازم 4 أرقام."; return; }
-        if(pin !== confirmPin){ errEl.textContent = "الـ PIN ما تطابق."; return; }
-        submitBtn.disabled = true; submitBtn.textContent = "⏳...";
-        const hash = await sha256Hex(pin);
-        await sbPatch("/homeapp_members?id=eq."+member.id, { pin_hash: hash });
-        member.pin_hash = hash;
-        overlay.remove();
-        state.me = member;
-        await refreshAll();
-        ensurePushSubscription();
-        startLocationTracking();
-      } else {
-        const oldPin = document.getElementById("pinOld").value.trim();
-        const newPin = document.getElementById("pinInput").value.trim();
-        const confirmPin = document.getElementById("pinConfirm").value.trim();
-        const oldHash = await sha256Hex(oldPin);
-        if(oldHash !== state.me.pin_hash){ errEl.textContent = "❌ الـ PIN الحالي غلط."; return; }
-        if(!/^\d{4}$/.test(newPin)){ errEl.textContent = "لازم 4 أرقام للـ PIN الجديد."; return; }
-        if(newPin !== confirmPin){ errEl.textContent = "الـ PIN الجديد ما تطابق."; return; }
-        submitBtn.disabled = true; submitBtn.textContent = "⏳...";
-        const newHash = await sha256Hex(newPin);
-        await sbPatch("/homeapp_members?id=eq."+state.me.id, { pin_hash: newHash });
-        state.me.pin_hash = newHash;
-        overlay.remove();
-        alert("✅ تم تغيير الـ PIN.");
-      }
-    }catch(e){
-      console.error(e);
-      if(errEl) errEl.textContent = "❌ صار خطأ: " + (e.message || e);
-      if(submitBtn) submitBtn.disabled = false;
+  wirePinDots("newpin", async (pin, { reject, shake }) => {
+    if(!confirming){
+      overlay.remove();
+      renderNewPinStep(member, pin);
+      return;
     }
-  };
+    if(pin !== firstEntry){
+      errEl.textContent = "الرقمين مش متطابقين، جرّب كمان مرة";
+      shake(() => { overlay.remove(); renderNewPinStep(member, ""); });
+      return;
+    }
+    try{
+      const hash = await sha256Hex(pin);
+      await sbPatch("/homeapp_members?id=eq." + member.id, { pin_hash: hash });
+      member.pin_hash = hash;
+      overlay.remove();
+      showToast("✅ تم تغيير الـ PIN");
+      if(state.tab === "settings") paint();
+    } catch(e){
+      errEl.textContent = "ما نجحنا نحدّث الرقم السري: " + (e.message || e);
+      reject();
+    }
+  });
 }
 
 // ---------------- Rendering ----------------
@@ -952,7 +1176,8 @@ function renderLogin(){
     el.addEventListener("click", ()=>{
       const member = state.members.find(m => m.id === el.dataset.id);
       if(!member) return;
-      openPinModal(member.pin_hash ? "login" : "setup", member);
+      if(member.pin_hash) renderPinEntry(member);
+      else renderPinSetup(member);
     });
   });
 }
@@ -989,11 +1214,7 @@ function renderApp(){
   `;
   root.querySelectorAll("[data-tab]").forEach(el => el.addEventListener("click", ()=>{ state.tab = el.dataset.tab; paint(); }));
   root.querySelectorAll("[data-switch]").forEach(el => el.addEventListener("click", ()=>{
-    const m = state.members.find(x=>x.id===el.dataset.switch);
-    if(m && m.id !== state.me.id){
-      stopLocationTracking();
-      openPinModal(m.pin_hash ? "login" : "setup", m);
-    }
+    switchToMember(state.members.find(x=>x.id===el.dataset.switch));
   }));
   document.getElementById("bellBtn").addEventListener("click", renderNotifPanel);
 
@@ -1133,6 +1354,14 @@ function settingsHTML(){
       <p style="color:var(--muted);font-size:12px;margin:6px 0 0;">لازم PIN لدخول أي حد على حسابو — ما حدا يقدر يفوت على حساب حدا تاني بدون الـ PIN تبعو.</p>
     </div>
     <div class="settings-block">
+      <h4>🎂 عيد ميلادي</h4>
+      <div class="set-row">
+        <span>${state.me.birthday ? new Date(state.me.birthday + "T00:00").toLocaleDateString("ar", { month: "long", day: "numeric" }) : "لسا ما تحدد"}</span>
+        <button id="setBirthdayBtn">${state.me.birthday ? "تعديل" : "تحديد"}</button>
+      </div>
+      <p style="color:var(--muted);font-size:12px;margin:6px 0 0;">قبل أسبوع، الباقي بياخدو استفتاء سرّي لهدية عيد ميلادك — ما رح تشوفو. وبنفس اليوم، كل العيلة بتاخد تهنئة عيد ميلاد.</p>
+    </div>
+    <div class="settings-block">
       <h4>MEMBERS (4 max for this MVP)</h4>
       ${state.members.map(m => `
         <div class="set-row"><span>${m.emoji} <bdi>${esc(m.name)}</bdi></span></div>
@@ -1263,7 +1492,8 @@ function wireTabEvents(){
   }
   if(state.tab === "settings"){
     const rb = document.getElementById("renameFamilyBtn"); if(rb) rb.onclick = renameFamily;
-    const cp = document.getElementById("changePinBtn"); if(cp) cp.onclick = ()=> openPinModal("change", state.me);
+    const cp = document.getElementById("changePinBtn"); if(cp) cp.onclick = ()=> openChangePinFlow(state.me);
+    const sb = document.getElementById("setBirthdayBtn"); if(sb) sb.onclick = setBirthday;
     root.querySelectorAll("[data-edit]").forEach(el => el.onclick = ()=> editAction(state.actionTypes.find(a=>a.id===el.dataset.edit)));
     root.querySelectorAll("[data-remove]").forEach(el => el.onclick = ()=> removeCustomAction(state.actionTypes.find(a=>a.id===el.dataset.remove)));
     const ns = document.getElementById("notifSwitch"); if(ns) ns.onclick = toggleNotifPermission;
