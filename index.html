@@ -195,7 +195,9 @@ const state = {
   pendingAction: null, // action type awaiting a note
   homeLocation: null,  // { lat, lng, radius }
   watchId: null,
-  polls: {}            // event_id -> poll { id, question, homeapp_poll_responses }
+  polls: {},            // event_id -> poll { id, question, homeapp_poll_responses }
+  lastDistanceFromHome: null,
+  lastGpsAccuracy: null
 };
 
 const root = document.getElementById("app");
@@ -403,10 +405,12 @@ function distMeters(lat1, lng1, lat2, lng2){
 
 async function onPositionUpdate(pos){
   if(!state.me || !state.homeLocation) return;
-  const { latitude, longitude } = pos.coords;
+  const { latitude, longitude, accuracy } = pos.coords;
   const d = distMeters(latitude, longitude, state.homeLocation.lat, state.homeLocation.lng);
   const nowHome = d <= state.homeLocation.radius;
   const wasHome = state.me.is_home;
+  state.lastDistanceFromHome = d;
+  state.lastGpsAccuracy = accuracy;
 
   await sbPost("/homeapp_member_location?on_conflict=member_id", [{ member_id: state.me.id, lat: latitude, lng: longitude, updated_at: new Date().toISOString() }])
     .catch(()=> sbPatch("/homeapp_member_location?member_id=eq."+state.me.id, { lat: latitude, lng: longitude, updated_at: new Date().toISOString() }));
@@ -417,7 +421,7 @@ async function onPositionUpdate(pos){
     const label = nowHome ? "وصلت عالبيت" : "طالع من البيت";
     const at = state.actionTypes.find(a => a.label === label);
     if(at) await performAction(at, null);
-  } else if(state.tab === "home"){
+  } else if(state.tab === "home" || state.tab === "settings"){
     paint();
   }
 }
@@ -1028,6 +1032,10 @@ function settingsHTML(){
         <button class="btn ghost" id="pickOnMapBtn" style="flex:1;">🗺️ من الخريطة</button>
       </div>
       <div class="set-row" style="margin-top:6px;"><span>نصف القطر (متر)</span><button id="editRadiusBtn">تعديل</button></div>
+      ${state.lastDistanceFromHome !== null ? `
+        <div class="set-row"><span>مسافتك الحالية عن البيت</span><span style="font-weight:700;color:${state.lastDistanceFromHome <= (state.homeLocation?.radius||100) ? '#22C55E' : '#FF4D4F'};">${Math.round(state.lastDistanceFromHome)}م</span></div>
+        <p style="color:var(--muted);font-size:11px;margin:4px 0 0;">دقّة الـ GPS الحالية: ±${state.lastGpsAccuracy ? Math.round(state.lastGpsAccuracy) : "؟"}م. إذا المسافة كبيرة رغم إنك بالبيت، جرّب "📍 موقعي الحالي" وإنت واقف بنفس المكان — أو كبّر نصف القطر.</p>
+      ` : ""}
       <p id="locStatusMsg" style="color:var(--brand);font-size:12px;font-weight:600;margin:8px 0 0;min-height:16px;"></p>
       <p style="color:var(--muted);font-size:11px;margin:8px 0 0;">⚠️ التتبّع بيشتغل بس لمّا التطبيق مفتوح (أو بالخلفية القريبة) عبراوزر الموبايل — مش تتبّع حقيقي بالخلفية لمّا التطبيق مسكّر تمامًا، هيدا قيد من أبل/غوغل على مواقع الويب مش شي فينا نتخطاه بدون تطبيق حقيقي (native).</p>
     </div>
