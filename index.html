@@ -117,6 +117,7 @@
   .switch .knob{position:absolute;top:3px;left:3px;width:20px;height:20px;background:white;border-radius:50%;transition:.15s;}
   .switch.on .knob{left:21px;}
   input.txtinput{border:1px solid #E5E1FA;border-radius:10px;padding:8px 10px;font-size:13px;font-family:inherit;}
+  .pin-input{width:100%;text-align:center;font-size:24px;letter-spacing:10px;border:1px solid #E5E1FA;border-radius:12px;padding:12px;font-family:inherit;box-sizing:border-box;}
 
   /* geofencing additions */
   .home-badge{font-size:10px;font-weight:800;padding:2px 6px;border-radius:8px;margin-inline-start:4px;}
@@ -294,7 +295,11 @@ async function loadStatic(){
   const hlat = settings.find(s => s.key === "home_lat");
   const hlng = settings.find(s => s.key === "home_lng");
   const hrad = settings.find(s => s.key === "home_radius_m");
-  state.homeLocation = (hlat && hlng) ? { lat: parseFloat(hlat.value), lng: parseFloat(hlng.value), radius: hrad ? parseInt(hrad.value,10) : 100 } : null;
+  const parsedLat = hlat ? parseFloat(hlat.value) : NaN;
+  const parsedLng = hlng ? parseFloat(hlng.value) : NaN;
+  state.homeLocation = (Number.isFinite(parsedLat) && Number.isFinite(parsedLng))
+    ? { lat: parsedLat, lng: parsedLng, radius: hrad ? parseInt(hrad.value,10) : 100 }
+    : null;
 }
 
 async function loadEvents(){
@@ -746,6 +751,105 @@ function toggleNotifPermission(){
   });
 }
 
+// ---------------- PIN auth ----------------
+async function sha256Hex(text){
+  const enc = new TextEncoder().encode(text);
+  const buf = await crypto.subtle.digest("SHA-256", enc);
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
+}
+
+function openPinModal(mode, member){
+  const overlay = document.createElement("div");
+  overlay.className = "overlay";
+  let bodyHtml;
+  if(mode === "login"){
+    bodyHtml = `
+      <h3>🔒 ${member.emoji} <bdi>${esc(member.name)}</bdi></h3>
+      <p class="sub">دخّل الـ PIN تبعك (4 أرقام)</p>
+      <input type="password" inputmode="numeric" maxlength="4" id="pinInput" class="pin-input" placeholder="••••" />
+      <p id="pinError" style="color:#FF4D4F;font-size:12px;min-height:16px;margin:6px 0 0;"></p>
+      <div class="row"><button class="btn ghost" id="pinCancel">إلغاء</button><button class="btn primary" id="pinSubmit">دخول</button></div>
+    `;
+  } else if(mode === "setup"){
+    bodyHtml = `
+      <h3>🔒 ${member.emoji} <bdi>${esc(member.name)}</bdi></h3>
+      <p class="sub">أول مرة؟ حدد PIN من 4 أرقام لحسابك</p>
+      <input type="password" inputmode="numeric" maxlength="4" id="pinInput" class="pin-input" placeholder="PIN جديد" />
+      <input type="password" inputmode="numeric" maxlength="4" id="pinConfirm" class="pin-input" placeholder="أكّد الـ PIN" style="margin-top:8px;" />
+      <p id="pinError" style="color:#FF4D4F;font-size:12px;min-height:16px;margin:6px 0 0;"></p>
+      <div class="row"><button class="btn ghost" id="pinCancel">إلغاء</button><button class="btn primary" id="pinSubmit">حفظ ودخول</button></div>
+    `;
+  } else {
+    bodyHtml = `
+      <h3>🔒 غيّر الـ PIN تبعك</h3>
+      <p class="sub">دخّل الـ PIN الحالي</p>
+      <input type="password" inputmode="numeric" maxlength="4" id="pinOld" class="pin-input" placeholder="PIN الحالي" />
+      <input type="password" inputmode="numeric" maxlength="4" id="pinInput" class="pin-input" placeholder="PIN جديد" style="margin-top:8px;" />
+      <input type="password" inputmode="numeric" maxlength="4" id="pinConfirm" class="pin-input" placeholder="أكّد الـ PIN الجديد" style="margin-top:8px;" />
+      <p id="pinError" style="color:#FF4D4F;font-size:12px;min-height:16px;margin:6px 0 0;"></p>
+      <div class="row"><button class="btn ghost" id="pinCancel">إلغاء</button><button class="btn primary" id="pinSubmit">حفظ</button></div>
+    `;
+  }
+  overlay.innerHTML = `<div class="sheet">${bodyHtml}</div>`;
+  document.body.appendChild(overlay);
+
+  document.getElementById("pinCancel").onclick = ()=> overlay.remove();
+  document.getElementById("pinSubmit").onclick = async ()=>{
+    const errEl = document.getElementById("pinError");
+    const submitBtn = document.getElementById("pinSubmit");
+    try{
+      if(mode === "login"){
+        const pin = document.getElementById("pinInput").value.trim();
+        if(!/^\d{4}$/.test(pin)){ errEl.textContent = "لازم 4 أرقام."; return; }
+        submitBtn.disabled = true; submitBtn.textContent = "⏳...";
+        const hash = await sha256Hex(pin);
+        if(hash !== member.pin_hash){
+          errEl.textContent = "❌ PIN غلط.";
+          submitBtn.disabled = false; submitBtn.textContent = "دخول";
+          return;
+        }
+        overlay.remove();
+        state.me = member;
+        await refreshAll();
+        ensurePushSubscription();
+        startLocationTracking();
+      } else if(mode === "setup"){
+        const pin = document.getElementById("pinInput").value.trim();
+        const confirmPin = document.getElementById("pinConfirm").value.trim();
+        if(!/^\d{4}$/.test(pin)){ errEl.textContent = "لازم 4 أرقام."; return; }
+        if(pin !== confirmPin){ errEl.textContent = "الـ PIN ما تطابق."; return; }
+        submitBtn.disabled = true; submitBtn.textContent = "⏳...";
+        const hash = await sha256Hex(pin);
+        await sbPatch("/homeapp_members?id=eq."+member.id, { pin_hash: hash });
+        member.pin_hash = hash;
+        overlay.remove();
+        state.me = member;
+        await refreshAll();
+        ensurePushSubscription();
+        startLocationTracking();
+      } else {
+        const oldPin = document.getElementById("pinOld").value.trim();
+        const newPin = document.getElementById("pinInput").value.trim();
+        const confirmPin = document.getElementById("pinConfirm").value.trim();
+        const oldHash = await sha256Hex(oldPin);
+        if(oldHash !== state.me.pin_hash){ errEl.textContent = "❌ الـ PIN الحالي غلط."; return; }
+        if(!/^\d{4}$/.test(newPin)){ errEl.textContent = "لازم 4 أرقام للـ PIN الجديد."; return; }
+        if(newPin !== confirmPin){ errEl.textContent = "الـ PIN الجديد ما تطابق."; return; }
+        submitBtn.disabled = true; submitBtn.textContent = "⏳...";
+        const newHash = await sha256Hex(newPin);
+        await sbPatch("/homeapp_members?id=eq."+state.me.id, { pin_hash: newHash });
+        state.me.pin_hash = newHash;
+        overlay.remove();
+        alert("✅ تم تغيير الـ PIN.");
+      }
+    }catch(e){
+      console.error(e);
+      if(errEl) errEl.textContent = "❌ صار خطأ: " + (e.message || e);
+      if(submitBtn) submitBtn.disabled = false;
+    }
+  };
+}
+
 // ---------------- Rendering ----------------
 function paint(){
   if(!state.me){ renderLogin(); return; }
@@ -768,10 +872,9 @@ function renderLogin(){
     </div>`;
   root.querySelectorAll(".avatar-pick").forEach(el=>{
     el.addEventListener("click", ()=>{
-      state.me = state.members.find(m => m.id === el.dataset.id);
-      refreshAll();
-      ensurePushSubscription();
-      startLocationTracking();
+      const member = state.members.find(m => m.id === el.dataset.id);
+      if(!member) return;
+      openPinModal(member.pin_hash ? "login" : "setup", member);
     });
   });
 }
@@ -807,7 +910,10 @@ function renderApp(){
   root.querySelectorAll("[data-tab]").forEach(el => el.addEventListener("click", ()=>{ state.tab = el.dataset.tab; paint(); }));
   root.querySelectorAll("[data-switch]").forEach(el => el.addEventListener("click", ()=>{
     const m = state.members.find(x=>x.id===el.dataset.switch);
-    if(m){ stopLocationTracking(); state.me = m; refreshAll(); startLocationTracking(); }
+    if(m && m.id !== state.me.id){
+      stopLocationTracking();
+      openPinModal(m.pin_hash ? "login" : "setup", m);
+    }
   }));
   document.getElementById("bellBtn").addEventListener("click", renderNotifPanel);
 
@@ -932,6 +1038,11 @@ function settingsHTML(){
         <div class="switch ${state.me.location_sharing ? 'on':''}" id="locShareSwitch"><div class="knob"></div></div>
       </div>
       <p style="color:var(--muted);font-size:12px;margin:6px 0 0;">لما تكون مفعّلة، الباقي بيشوفو بس 🟢 بالبيت / 🔴 برا — مش موقعك بالتفصيل.</p>
+    </div>
+    <div class="settings-block">
+      <h4>🔒 SECURITY</h4>
+      <div class="set-row"><span>الـ PIN تبعي</span><button id="changePinBtn">غيّر الـ PIN</button></div>
+      <p style="color:var(--muted);font-size:12px;margin:6px 0 0;">لازم PIN لدخول أي حد على حسابو — ما حدا يقدر يفوت على حساب حدا تاني بدون الـ PIN تبعو.</p>
     </div>
     <div class="settings-block">
       <h4>MEMBERS (4 max for this MVP)</h4>
@@ -1064,6 +1175,7 @@ function wireTabEvents(){
   }
   if(state.tab === "settings"){
     const rb = document.getElementById("renameFamilyBtn"); if(rb) rb.onclick = renameFamily;
+    const cp = document.getElementById("changePinBtn"); if(cp) cp.onclick = ()=> openPinModal("change", state.me);
     root.querySelectorAll("[data-edit]").forEach(el => el.onclick = ()=> editAction(state.actionTypes.find(a=>a.id===el.dataset.edit)));
     root.querySelectorAll("[data-remove]").forEach(el => el.onclick = ()=> removeCustomAction(state.actionTypes.find(a=>a.id===el.dataset.remove)));
     const ns = document.getElementById("notifSwitch"); if(ns) ns.onclick = toggleNotifPermission;
