@@ -118,6 +118,10 @@
   .switch.on .knob{left:21px;}
   input.txtinput{border:1px solid #E5E1FA;border-radius:10px;padding:8px 10px;font-size:13px;font-family:inherit;}
   .pin-input{width:100%;text-align:center;font-size:24px;letter-spacing:10px;border:1px solid #E5E1FA;border-radius:12px;padding:12px;font-family:inherit;box-sizing:border-box;}
+  #liveMap{width:100%;height:320px;border-radius:16px;overflow:hidden;background:#eee;}
+  .live-map-legend{display:flex;flex-direction:column;gap:8px;padding:0 18px;margin-top:12px;}
+  .live-map-row{background:var(--card);border-radius:14px;padding:10px 14px;box-shadow:var(--shadow);display:flex;align-items:center;gap:10px;font-size:14px;font-weight:600;}
+  .live-map-row .time{margin-inline-start:auto;font-size:11px;color:var(--muted);font-weight:400;}
 
   /* geofencing additions */
   .home-badge{font-size:10px;font-weight:800;padding:2px 6px;border-radius:8px;margin-inline-start:4px;}
@@ -197,7 +201,8 @@ const state = {
   watchId: null,
   polls: {},            // event_id -> poll { id, question, homeapp_poll_responses }
   lastDistanceFromHome: null,
-  lastGpsAccuracy: null
+  lastGpsAccuracy: null,
+  memberLocations: []
 };
 
 const root = document.getElementById("app");
@@ -337,11 +342,16 @@ async function loadPolls(){
   state.polls = map;
 }
 
+async function loadMemberLocations(){
+  state.memberLocations = await sbGet("/homeapp_member_location?select=member_id,lat,lng,updated_at,homeapp_members(name,emoji,location_sharing)");
+}
+
 async function refreshAll(render=true){
   try{
     await loadEvents();
     await loadUnread();
     await loadPolls();
+    await loadMemberLocations();
     if(render) paint();
   }catch(e){ console.error(e); }
 }
@@ -571,6 +581,60 @@ async function ensureLeaflet(){
 }
 
 let homeMapInstance = null, homeMapMarker = null, homeMapPickedLatLng = null;
+let liveMapInstance = null;
+function mapTabHTML(){
+  const visible = (state.memberLocations || []).filter(l => l.homeapp_members && l.homeapp_members.location_sharing && l.lat != null && l.lng != null);
+  return `
+    <div class="section-title">LIVE LOCATIONS</div>
+    <div style="padding:0 18px;"><div id="liveMap"></div></div>
+    <div class="live-map-legend">
+      ${visible.length ? visible.map(l => `
+        <div class="live-map-row">
+          <span>${l.homeapp_members.emoji}</span><span><bdi>${esc(l.homeapp_members.name)}</bdi></span>
+          <span class="time">${fmtTime(l.updated_at)}</span>
+        </div>
+      `).join("") : `<div class="empty">ما في حدا مفعّل "📍 Location Sharing" حاليًا.</div>`}
+    </div>
+  `;
+}
+
+async function initLiveMap(){
+  if(liveMapInstance){ try{ liveMapInstance.remove(); }catch(e){} liveMapInstance = null; }
+  const leafletReady = await ensureLeaflet();
+  const mapDiv = document.getElementById("liveMap");
+  if(!mapDiv) return; // user already switched tabs
+  if(!leafletReady){
+    mapDiv.innerHTML = `<div class="empty" style="padding:20px;">تعذّر تحميل الخريطة (مشكلة اتصال بالإنترنت).</div>`;
+    return;
+  }
+  const visible = (state.memberLocations || []).filter(l => l.homeapp_members && l.homeapp_members.location_sharing && l.lat != null && l.lng != null);
+  if(!visible.length){
+    mapDiv.innerHTML = `<div class="empty" style="padding:20px;">ما في حدا مفعّل مشاركة الموقع حاليًا.</div>`;
+    return;
+  }
+
+  liveMapInstance = L.map("liveMap").setView([visible[0].lat, visible[0].lng], 15);
+  let osmTileErrors = 0, switchedProvider = false;
+  const osmLayer = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "© OpenStreetMap" }).addTo(liveMapInstance);
+  osmLayer.on("tileerror", ()=>{
+    osmTileErrors++;
+    if(osmTileErrors >= 3 && !switchedProvider){
+      switchedProvider = true;
+      liveMapInstance.removeLayer(osmLayer);
+      L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", { attribution: "© OpenStreetMap © CARTO", subdomains: "abcd" }).addTo(liveMapInstance);
+    }
+  });
+
+  const bounds = [];
+  visible.forEach(l => {
+    const marker = L.marker([l.lat, l.lng]).addTo(liveMapInstance);
+    marker.bindPopup(`<b>${l.homeapp_members.emoji} ${esc(l.homeapp_members.name)}</b><br>${fmtTime(l.updated_at)}`);
+    bounds.push([l.lat, l.lng]);
+  });
+  if(bounds.length > 1) liveMapInstance.fitBounds(bounds, { padding: [30,30] });
+  setTimeout(()=>{ if(liveMapInstance) liveMapInstance.invalidateSize(); }, 200);
+}
+
 async function openMapPicker(){
   const overlay = document.createElement("div");
   overlay.className = "overlay";
@@ -911,6 +975,7 @@ function renderApp(){
       <div class="tabs">
         <button class="tab ${state.tab==='home'?'active':''}" data-tab="home">Home</button>
         <button class="tab ${state.tab==='history'?'active':''}" data-tab="history">History</button>
+        <button class="tab ${state.tab==='map'?'active':''}" data-tab="map">Map</button>
         <button class="tab ${state.tab==='settings'?'active':''}" data-tab="settings">Settings</button>
       </div>
     </div>
@@ -918,6 +983,7 @@ function renderApp(){
     <div class="bottomnav">
       <button class="navbtn ${state.tab==='home'?'active':''}" data-tab="home"><span class="em">🏠</span>Home</button>
       <button class="navbtn ${state.tab==='history'?'active':''}" data-tab="history"><span class="em">🕓</span>History</button>
+      <button class="navbtn ${state.tab==='map'?'active':''}" data-tab="map"><span class="em">🗺️</span>Map</button>
       <button class="navbtn ${state.tab==='settings'?'active':''}" data-tab="settings"><span class="em">⚙️</span>Settings</button>
     </div>
   `;
@@ -934,6 +1000,7 @@ function renderApp(){
   const content = document.getElementById("content");
   if(state.tab === "home") content.innerHTML = homeHTML();
   else if(state.tab === "history") content.innerHTML = historyHTML();
+  else if(state.tab === "map") { content.innerHTML = mapTabHTML(); initLiveMap(); }
   else content.innerHTML = settingsHTML();
 
   wirePollButtons(content);
