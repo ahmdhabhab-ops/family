@@ -427,7 +427,14 @@ async function refreshAll(render=true){
     await loadUnread();
     await loadPolls();
     await loadMemberLocations();
-    if(render) paint();
+    if(render){
+      // While already parked on the Map tab, update pins in place instead of
+      // going through paint() — paint() rebuilds the whole app shell every
+      // time, which would tear down and remount the Leaflet map on every
+      // periodic refresh (see initLiveMap/updateLiveMapMarkers).
+      if(state.tab === "map" && mapTabMounted) updateLiveMapMarkers();
+      else paint();
+    }
   }catch(e){ console.error(e); }
 }
 
@@ -657,38 +664,45 @@ async function ensureLeaflet(){
 
 let homeMapInstance = null, homeMapMarker = null, homeMapPickedLatLng = null;
 let liveMapInstance = null;
-let liveMapSavedView = null; // { center, zoom } — carried across the periodic rebuilds below so the map doesn't visibly re-zoom every refresh
+let liveMapMarkers = {}; // member_id -> Leaflet marker, kept alive across periodic refreshes so pins move in place instead of the whole map being rebuilt
+let mapTabMounted = false; // true once the Map tab's DOM + Leaflet instance exist; periodic refreshes update in place instead of remounting
+
+const LIVE_LOCATION_STALE_MS = 30 * 60 * 1000;
+function isStaleLocation(updatedAt){ return (Date.now() - new Date(updatedAt).getTime()) > LIVE_LOCATION_STALE_MS; }
+function visibleMemberLocations(){
+  return (state.memberLocations || []).filter(l => l.homeapp_members && l.homeapp_members.location_sharing && l.lat != null && l.lng != null);
+}
+function liveMapPopupHTML(l, stale){
+  return `<b>${l.homeapp_members.emoji} ${esc(l.homeapp_members.name)}</b><br>${fmtTime(l.updated_at)}${stale ? "<br>⚠️ آخر تحديث مش حديث" : ""}`;
+}
+function liveMapLegendHTML(visible){
+  return visible.length ? visible.map(l => {
+    const stale = isStaleLocation(l.updated_at);
+    return `
+      <div class="live-map-row">
+        <span>${l.homeapp_members.emoji}</span><span><bdi>${esc(l.homeapp_members.name)}</bdi></span>
+        <span class="time">${stale ? "⚠️ " : ""}${fmtTime(l.updated_at)}</span>
+      </div>
+    `;
+  }).join("") : `<div class="empty">ما في حدا مفعّل "📍 Location Sharing" حاليًا.</div>`;
+}
+
 function mapTabHTML(){
-  const visible = (state.memberLocations || []).filter(l => l.homeapp_members && l.homeapp_members.location_sharing && l.lat != null && l.lng != null);
-  const STALE_MS = 30 * 60 * 1000;
-  const now = Date.now();
+  const visible = visibleMemberLocations();
   return `
     <div class="section-title">LIVE LOCATIONS</div>
     <div style="padding:0 18px;"><div id="liveMap"></div></div>
-    <div class="live-map-legend">
-      ${visible.length ? visible.map(l => {
-        const stale = (now - new Date(l.updated_at).getTime()) > STALE_MS;
-        return `
-        <div class="live-map-row">
-          <span>${l.homeapp_members.emoji}</span><span><bdi>${esc(l.homeapp_members.name)}</bdi></span>
-          <span class="time">${stale ? "⚠️ " : ""}${fmtTime(l.updated_at)}</span>
-        </div>
-      `;
-      }).join("") : `<div class="empty">ما في حدا مفعّل "📍 Location Sharing" حاليًا.</div>`}
-    </div>
+    <div class="live-map-legend" id="liveMapLegend">${liveMapLegendHTML(visible)}</div>
   `;
 }
 
+// Full (re)build — only called when freshly entering the Map tab, since the
+// tab switch just replaced #content and any previous Leaflet instance is
+// bound to a now-detached DOM node.
 async function initLiveMap(){
-  if(liveMapInstance){
-    // paint() re-renders the whole Map tab every ~2.5s (periodic refresh),
-    // which destroys this map's DOM node and forces a rebuild. Without
-    // remembering the view, every rebuild reset to setView/fitBounds and it
-    // looked like the map was "zooming by itself" every few seconds.
-    try{ liveMapSavedView = { center: liveMapInstance.getCenter(), zoom: liveMapInstance.getZoom() }; }catch(e){}
-    try{ liveMapInstance.remove(); }catch(e){}
-    liveMapInstance = null;
-  }
+  if(liveMapInstance){ try{ liveMapInstance.remove(); }catch(e){} liveMapInstance = null; }
+  liveMapMarkers = {};
+  mapTabMounted = false;
   const leafletReady = await ensureLeaflet();
   const mapDiv = document.getElementById("liveMap");
   if(!mapDiv) return; // user already switched tabs
@@ -696,7 +710,7 @@ async function initLiveMap(){
     mapDiv.innerHTML = `<div class="empty" style="padding:20px;">تعذّر تحميل الخريطة (مشكلة اتصال بالإنترنت).</div>`;
     return;
   }
-  const visible = (state.memberLocations || []).filter(l => l.homeapp_members && l.homeapp_members.location_sharing && l.lat != null && l.lng != null);
+  const visible = visibleMemberLocations();
   if(!visible.length){
     mapDiv.innerHTML = `<div class="empty" style="padding:20px;">ما في حدا مفعّل مشاركة الموقع حاليًا.</div>`;
     return;
@@ -714,28 +728,50 @@ async function initLiveMap(){
     }
   });
 
-  // Warn when a pin's last update is old — otherwise a stale "at home" fix
-  // (e.g. from last night) looks exactly like a live one.
-  const STALE_MS = 30 * 60 * 1000;
-  const now = Date.now();
   const bounds = [];
   visible.forEach(l => {
-    const stale = (now - new Date(l.updated_at).getTime()) > STALE_MS;
+    const stale = isStaleLocation(l.updated_at);
     const marker = L.marker([l.lat, l.lng], { opacity: stale ? 0.55 : 1 }).addTo(liveMapInstance);
-    marker.bindPopup(`<b>${l.homeapp_members.emoji} ${esc(l.homeapp_members.name)}</b><br>${fmtTime(l.updated_at)}${stale ? "<br>⚠️ آخر تحديث مش حديث" : ""}`);
+    marker.bindPopup(liveMapPopupHTML(l, stale));
+    liveMapMarkers[l.member_id] = marker;
     bounds.push([l.lat, l.lng]);
   });
-
-  // Preserve whatever pan/zoom the user already had; only auto-fit the very
-  // first time the map opens (when there's no saved view yet).
-  if(liveMapSavedView){
-    liveMapInstance.setView(liveMapSavedView.center, liveMapSavedView.zoom);
-  } else if(bounds.length > 1){
-    liveMapInstance.fitBounds(bounds, { padding: [30,30] });
-  } else {
-    liveMapInstance.setView([visible[0].lat, visible[0].lng], 15);
-  }
+  if(bounds.length > 1) liveMapInstance.fitBounds(bounds, { padding: [30,30] });
+  else liveMapInstance.setView([visible[0].lat, visible[0].lng], 15);
   setTimeout(()=>{ if(liveMapInstance) liveMapInstance.invalidateSize(); }, 200);
+  mapTabMounted = true;
+}
+
+// Called instead of initLiveMap() on periodic refreshes while the user is
+// already looking at the Map tab: moves existing pins and refreshes the
+// legend text WITHOUT touching the Leaflet instance or its DOM. Rebuilding
+// the whole map every ~2.5s used to snap pan/zoom back (looked like the map
+// "zooming by itself") and could cut off an in-progress drag/pinch, leaving
+// the map stuck not responding to touch.
+function updateLiveMapMarkers(){
+  const visible = visibleMemberLocations();
+  const legendEl = document.getElementById("liveMapLegend");
+  if(legendEl) legendEl.innerHTML = liveMapLegendHTML(visible);
+  if(!liveMapInstance) return; // nobody was sharing at mount time, or Leaflet failed to load
+
+  const seen = new Set();
+  visible.forEach(l => {
+    seen.add(l.member_id);
+    const stale = isStaleLocation(l.updated_at);
+    const marker = liveMapMarkers[l.member_id];
+    if(marker){
+      marker.setLatLng([l.lat, l.lng]);
+      marker.setOpacity(stale ? 0.55 : 1);
+      marker.setPopupContent(liveMapPopupHTML(l, stale));
+    } else {
+      const m = L.marker([l.lat, l.lng], { opacity: stale ? 0.55 : 1 }).addTo(liveMapInstance);
+      m.bindPopup(liveMapPopupHTML(l, stale));
+      liveMapMarkers[l.member_id] = m;
+    }
+  });
+  Object.keys(liveMapMarkers).forEach(id => {
+    if(!seen.has(id)){ try{ liveMapMarkers[id].remove(); }catch(e){} delete liveMapMarkers[id]; }
+  });
 }
 
 async function openMapPicker(){
@@ -1241,9 +1277,14 @@ function renderApp(){
     </div>
   `;
   root.querySelectorAll("[data-tab]").forEach(el => el.addEventListener("click", ()=>{
-    // Freshly entering the Map tab should re-fit to everyone; a periodic
-    // background refresh while already on it should not (see initLiveMap).
-    if(el.dataset.tab === "map" && state.tab !== "map") liveMapSavedView = null;
+    // Leaving the Map tab: this click's paint() is about to replace #content
+    // (and #liveMap with it), so tear the Leaflet instance down cleanly
+    // instead of leaving it bound to a DOM node that's about to vanish.
+    if(state.tab === "map" && el.dataset.tab !== "map"){
+      if(liveMapInstance){ try{ liveMapInstance.remove(); }catch(e){} liveMapInstance = null; }
+      liveMapMarkers = {};
+      mapTabMounted = false;
+    }
     state.tab = el.dataset.tab;
     paint();
   }));
