@@ -447,6 +447,17 @@ async function tryClaimNescafeDay(todayKey){
   }catch(e){ console.error("tryClaimNescafeDay failed:", e); return false; }
 }
 
+// Local (device) calendar date as YYYY-MM-DD — deliberately NOT
+// toISOString(), which is UTC and would roll the day over at 9-10pm Beirut
+// time instead of local midnight.
+function localDateKey(d){
+  d = d || new Date();
+  const y = d.getFullYear();
+  const mo = String(d.getMonth() + 1).padStart(2, "0");
+  const da = String(d.getDate()).padStart(2, "0");
+  return `${y}-${mo}-${da}`;
+}
+
 // Runs on every refresh, but only acts once per calendar day (see the claim
 // above): settles yesterday's turn — the rest of the family votes on whether
 // that person actually made nescafe, and if "لأ" wins the vote, that's a $10
@@ -454,7 +465,7 @@ async function tryClaimNescafeDay(todayKey){
 // next member and announces it with a fresh vote.
 async function checkNescafeTurn(){
   if(!state.me || !state.members.length) return;
-  const todayKey = new Date().toISOString().slice(0,10);
+  const todayKey = localDateKey();
   if(state.nescafeTurn.date === todayKey) return;
   const claimed = await tryClaimNescafeDay(todayKey);
   if(!claimed){ state.nescafeTurn.date = todayKey; return; }
