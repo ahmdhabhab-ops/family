@@ -212,7 +212,6 @@ const state = {
   homeLocation: null,  // { lat, lng, radius }
   watchId: null,
   polls: {},            // event_id -> poll { id, question, homeapp_poll_responses }
-  nescafeTurn: { date: null, memberId: null, pollEventId: null },
   lastDistanceFromHome: null,
   lastGpsAccuracy: null,
   memberLocations: []
@@ -320,14 +319,6 @@ async function loadStatic(){
   state.homeLocation = (Number.isFinite(parsedLat) && Number.isFinite(parsedLng))
     ? { lat: parsedLat, lng: parsedLng, radius: hrad ? parseInt(hrad.value,10) : 100 }
     : null;
-  const ndate = settings.find(s => s.key === "nescafe_turn_date");
-  const nmember = settings.find(s => s.key === "nescafe_turn_member_id");
-  const npoll = settings.find(s => s.key === "nescafe_poll_event_id");
-  state.nescafeTurn = {
-    date: ndate ? ndate.value : null,
-    memberId: nmember ? nmember.value : null,
-    pollEventId: npoll ? npoll.value : null
-  };
 }
 
 async function loadEvents(){
@@ -429,77 +420,9 @@ async function tryClaimBirthdayMilestone(m, column, year, action){
   }catch(e){ console.error("checkBirthdays: failed for " + m.name + ":", e); }
 }
 
-// ---------------- Nescafe turn (daily coffee-duty rotation) ----------------
-// Atomically claims today's rotation so only one of however many family
-// devices are open actually runs it — same guarded-claim idea as
-// tryClaimBirthdayMilestone, but against homeapp_settings since there's no
-// per-row column here to flip.
-async function tryClaimNescafeDay(todayKey){
-  try{
-    const existing = await sbGet("/homeapp_settings?key=eq.nescafe_turn_date&select=value");
-    if(!existing.length){
-      try{ await sbPost("/homeapp_settings", { key:"nescafe_turn_date", value: todayKey }); return true; }
-      catch(e){ return false; }
-    }
-    if(existing[0].value === todayKey) return false;
-    const claimed = await sbPatch("/homeapp_settings?key=eq.nescafe_turn_date&value=neq."+todayKey, { value: todayKey });
-    return claimed.length > 0;
-  }catch(e){ console.error("tryClaimNescafeDay failed:", e); return false; }
-}
-
-// Runs on every refresh, but only acts once per calendar day (see the claim
-// above): settles yesterday's turn — a "لأ" answer to the poll means a $10
-// fine for breaking the family constitution — then rotates the turn to the
-// next member and announces it with a fresh yes/no poll.
-async function checkNescafeTurn(){
-  if(!state.me || !state.members.length) return;
-  const todayKey = new Date().toISOString().slice(0,10);
-  if(state.nescafeTurn.date === todayKey) return;
-  const claimed = await tryClaimNescafeDay(todayKey);
-  if(!claimed){ state.nescafeTurn.date = todayKey; return; }
-
-  if(state.nescafeTurn.memberId && state.nescafeTurn.pollEventId){
-    await settleNescafeFine(state.nescafeTurn.memberId, state.nescafeTurn.pollEventId);
-  }
-
-  const prevIdx = state.members.findIndex(m => m.id === state.nescafeTurn.memberId);
-  const next = state.members[(prevIdx + 1 + state.members.length) % state.members.length];
-
-  const text = `☕ اليوم دور ${next.name} يعمل نسكافيه للعيلة!`;
-  const ev = (await sbPost("/homeapp_events", { system_emoji: "☕", system_text: text }))[0];
-  await sbPost("/homeapp_polls", { event_id: ev.id, question: `يا ${next.name}، عملت نسكافيه اليوم؟ اكتب "ايه" أو "لأ" 👇` });
-  await sbPost("/homeapp_notifications", state.members.map(m => ({ event_id: ev.id, recipient_member_id: m.id })));
-  sendPush(state.familyName, text, state.members.map(m => m.id));
-
-  await upsertSetting("nescafe_turn_member_id", next.id);
-  await upsertSetting("nescafe_poll_event_id", ev.id);
-  state.nescafeTurn = { date: todayKey, memberId: next.id, pollEventId: ev.id };
-}
-
-// If the member whose turn it was answered "no" to their poll, post a
-// public fine notice (and push) so everyone sees it: $10, family constitution.
-async function settleNescafeFine(memberId, pollEventId){
-  try{
-    const polls = await sbGet("/homeapp_polls?event_id=eq."+pollEventId+"&select=homeapp_poll_responses(member_id,response)");
-    const responses = (polls[0] && polls[0].homeapp_poll_responses) || [];
-    const resp = responses.find(r => r.member_id === memberId);
-    if(!resp) return; // no answer at all — not a "no", so no fine
-    const said = resp.response.trim();
-    const saidNo = /^(لا|لأ)/.test(said) || /^no\b/i.test(said);
-    if(!saidNo) return;
-    const member = state.members.find(m => m.id === memberId);
-    if(!member) return;
-    const text = `💸 ${member.name} ما عمل نسكافيه إمبارح، لازم يدفع 10$ لأنه خالف قانون العيلة!`;
-    const fineEv = (await sbPost("/homeapp_events", { system_emoji: "💸", system_text: text }))[0];
-    await sbPost("/homeapp_notifications", state.members.map(m => ({ event_id: fineEv.id, recipient_member_id: m.id })));
-    sendPush(state.familyName, text, state.members.map(m => m.id));
-  }catch(e){ console.error("settleNescafeFine failed:", e); }
-}
-
 async function refreshAll(render=true){
   try{
     await checkBirthdays();
-    await checkNescafeTurn();
     await loadEvents();
     await loadUnread();
     await loadPolls();
