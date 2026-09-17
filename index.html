@@ -448,9 +448,10 @@ async function tryClaimNescafeDay(todayKey){
 }
 
 // Runs on every refresh, but only acts once per calendar day (see the claim
-// above): settles yesterday's turn — a "لأ" answer to the poll means a $10
+// above): settles yesterday's turn — the rest of the family votes on whether
+// that person actually made nescafe, and if "لأ" wins the vote, that's a $10
 // fine for breaking the family constitution — then rotates the turn to the
-// next member and announces it with a fresh yes/no poll.
+// next member and announces it with a fresh vote.
 async function checkNescafeTurn(){
   if(!state.me || !state.members.length) return;
   const todayKey = new Date().toISOString().slice(0,10);
@@ -467,7 +468,10 @@ async function checkNescafeTurn(){
 
   const text = `☕ اليوم دور ${next.name} يعمل نسكافيه للعيلة!`;
   const ev = (await sbPost("/homeapp_events", { system_emoji: "☕", system_text: text }))[0];
-  await sbPost("/homeapp_polls", { event_id: ev.id, question: `يا ${next.name}، عملت نسكافيه اليوم؟ اكتب "ايه" أو "لأ" 👇` });
+  // Asking the person themselves is pointless — they'll always say yes — so
+  // this poll asks everyone ELSE to vote on whether they actually did it
+  // (settleNescafeFine below ignores the assigned member's own answer).
+  await sbPost("/homeapp_polls", { event_id: ev.id, question: `صوّتوا: ${next.name} عمل نسكافيه اليوم؟ اكتبوا "ايه" أو "لأ" 👇` });
   await sbPost("/homeapp_notifications", state.members.map(m => ({ event_id: ev.id, recipient_member_id: m.id })));
   sendPush(state.familyName, text, state.members.map(m => m.id));
 
@@ -476,20 +480,25 @@ async function checkNescafeTurn(){
   state.nescafeTurn = { date: todayKey, memberId: next.id, pollEventId: ev.id };
 }
 
-// If the member whose turn it was answered "no" to their poll, post a
-// public fine notice (and push) so everyone sees it: $10, family constitution.
+// Tallies everyone else's votes on whether the assigned member made nescafe
+// (their own vote, if any, doesn't count — they'd obviously say yes). If
+// "لأ" is the majority, posts a public fine notice (and push): $10, family
+// constitution. No votes, or a tie, or "ايه" winning — no fine.
 async function settleNescafeFine(memberId, pollEventId){
   try{
     const polls = await sbGet("/homeapp_polls?event_id=eq."+pollEventId+"&select=homeapp_poll_responses(member_id,response)");
     const responses = (polls[0] && polls[0].homeapp_poll_responses) || [];
-    const resp = responses.find(r => r.member_id === memberId);
-    if(!resp) return; // no answer at all — not a "no", so no fine
-    const said = resp.response.trim();
-    const saidNo = /^(لا|لأ)/.test(said) || /^no\b/i.test(said);
-    if(!saidNo) return;
+    let noVotes = 0, yesVotes = 0;
+    responses.forEach(r => {
+      if(r.member_id === memberId) return;
+      const said = (r.response || "").trim();
+      if(/^(لا|لأ)/.test(said) || /^no\b/i.test(said)) noVotes++;
+      else if(/^(ايه|اه|نعم)/.test(said) || /^y(es)?\b/i.test(said)) yesVotes++;
+    });
+    if(noVotes === 0 || noVotes <= yesVotes) return;
     const member = state.members.find(m => m.id === memberId);
     if(!member) return;
-    const text = `💸 ${member.name} ما عمل نسكافيه إمبارح، لازم يدفع 10$ لأنه خالف قانون العيلة!`;
+    const text = `💸 الأكثرية صوتت إنو ${member.name} ما عمل نسكافيه إمبارح، لازم يدفع 10$ لأنه خالف قانون العيلة!`;
     const fineEv = (await sbPost("/homeapp_events", { system_emoji: "💸", system_text: text }))[0];
     await sbPost("/homeapp_notifications", state.members.map(m => ({ event_id: fineEv.id, recipient_member_id: m.id })));
     sendPush(state.familyName, text, state.members.map(m => m.id));
