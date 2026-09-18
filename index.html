@@ -420,9 +420,48 @@ async function tryClaimBirthdayMilestone(m, column, year, action){
   }catch(e){ console.error("checkBirthdays: failed for " + m.name + ":", e); }
 }
 
+// ---------------- Missing-birthday reminder ----------------
+// Atomically claims this member's next weekly reminder slot, same
+// GET-then-POST-or-PATCH idea as the nescafe day claim: a homeapp_settings
+// row per member holds the ISO time of their last reminder, and a device
+// only sends one if that row is missing or more than a week old.
+async function tryClaimBirthdayReminder(memberId){
+  const key = "birthday_reminder_" + memberId;
+  const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const now = new Date().toISOString();
+  try{
+    const existing = await sbGet("/homeapp_settings?key=eq."+key+"&select=value");
+    if(!existing.length){
+      try{ await sbPost("/homeapp_settings", { key, value: now }); return true; }
+      catch(e){ return false; }
+    }
+    if(existing[0].value > cutoff) return false; // already reminded within the last week
+    const claimed = await sbPatch("/homeapp_settings?key=eq."+key+"&value=eq."+encodeURIComponent(existing[0].value), { value: now });
+    return claimed.length > 0;
+  }catch(e){ console.error("tryClaimBirthdayReminder failed:", e); return false; }
+}
+
+// Runs on every refresh: nudges each member who hasn't set a birthday yet,
+// at most once a week per member, until they set one.
+async function checkMissingBirthdays(){
+  if(!state.me || !state.members.length) return;
+  for(const m of state.members){
+    if(m.birthday) continue;
+    const claimed = await tryClaimBirthdayReminder(m.id);
+    if(!claimed) continue;
+    try{
+      const text = `🎂 لسا ما حطّيت تاريخ عيد ميلادك يا ${m.name}! فوت عالإعدادات ⚙️ وحطّو، حتى نحتفل فيك ونجهّزلك مفاجأة 🎁`;
+      const ev = (await sbPost("/homeapp_events", { system_emoji: "🎂", system_text: text }))[0];
+      await sbPost("/homeapp_notifications", [{ event_id: ev.id, recipient_member_id: m.id }]);
+      sendPush(state.familyName, text, [m.id]);
+    }catch(e){ console.error("checkMissingBirthdays: failed for " + m.name + ":", e); }
+  }
+}
+
 async function refreshAll(render=true){
   try{
     await checkBirthdays();
+    await checkMissingBirthdays();
     await loadEvents();
     await loadUnread();
     await loadPolls();
