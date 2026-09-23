@@ -139,6 +139,7 @@
   .home-badge{font-size:10px;font-weight:800;padding:2px 6px;border-radius:8px;margin-inline-start:4px;}
   .home-badge.home{background:#E7F9EF;color:#128C4A;}
   .home-badge.away{background:#FDECEC;color:#D64545;}
+  .home-badge.stale{background:#F1EEFB;color:var(--muted);}
   #homeMapPicker{width:100%;height:280px;border-radius:14px;margin:10px 0;}
 </style>
 </head>
@@ -708,6 +709,21 @@ let mapTabMounted = false; // true once the Map tab's DOM + Leaflet instance exi
 
 const LIVE_LOCATION_STALE_MS = 30 * 60 * 1000;
 function isStaleLocation(updatedAt){ return (Date.now() - new Date(updatedAt).getTime()) > LIVE_LOCATION_STALE_MS; }
+
+// The topbar 🟢/🔴 chip used to trust homeapp_members.is_home blindly, with
+// no idea how old that flag actually was — a GPS fix from days ago (e.g.
+// nobody having the app open long enough for background tracking, a known
+// PWA limitation) still rendered as a confident "at home" for everyone.
+// Now it falls back to a neutral badge whenever the underlying location
+// fix is missing or stale.
+function memberHomeBadgeHTML(m){
+  if(!m.location_sharing || m.is_home === null) return "";
+  const loc = (state.memberLocations || []).find(l => l.member_id === m.id);
+  if(!loc || isStaleLocation(loc.updated_at)){
+    return `<span class="home-badge stale">⏱️ مش معروف</span>`;
+  }
+  return `<span class="home-badge ${m.is_home ? 'home' : 'away'}">${m.is_home ? '🟢 بالبيت' : '🔴 برا'}</span>`;
+}
 function visibleMemberLocations(){
   return (state.memberLocations || []).filter(l => l.homeapp_members && l.homeapp_members.location_sharing && l.lat != null && l.lng != null);
 }
@@ -1297,7 +1313,7 @@ function renderApp(){
         ${state.members.map(m => `
           <div class="member-chip ${m.id===state.me.id?'me':''}" data-switch="${m.id}">
             <span class="em">${m.emoji}</span><span><bdi>${esc(m.name)}</bdi></span>
-            ${m.location_sharing && m.is_home !== null ? `<span class="home-badge ${m.is_home ? 'home' : 'away'}">${m.is_home ? '🟢 بالبيت' : '🔴 برا'}</span>` : ""}
+            ${memberHomeBadgeHTML(m)}
           </div>`).join("")}
       </div>
       <div class="tabs">
