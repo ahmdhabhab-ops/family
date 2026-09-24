@@ -182,8 +182,8 @@ async function sbGet(path){
   if(!r.ok) throw new Error(await r.text());
   return r.json();
 }
-async function sbPost(path, body){
-  const r = await sbFetch(path, { method:"POST", headers: sbHeaders({ "Prefer":"return=representation" }), body: JSON.stringify(body) });
+async function sbPost(path, body, extraHeaders){
+  const r = await sbFetch(path, { method:"POST", headers: sbHeaders(Object.assign({ "Prefer":"return=representation" }, extraHeaders||{})), body: JSON.stringify(body) });
   if(!r.ok) throw new Error(await r.text());
   return r.json();
 }
@@ -359,7 +359,7 @@ async function loadPolls(){
 }
 
 async function loadMemberLocations(){
-  state.memberLocations = await sbGet("/homeapp_member_location?select=member_id,lat,lng,updated_at,homeapp_members(name,emoji,location_sharing)");
+  state.memberLocations = await sbGet("/homeapp_member_location?select=member_id,lat,lng,accuracy,updated_at,homeapp_members(name,emoji,location_sharing)");
 }
 
 // ---------------- Birthdays ----------------
@@ -540,22 +540,27 @@ async function onPositionUpdate(pos){
   const { latitude, longitude, accuracy } = pos.coords;
   state.lastGpsAccuracy = accuracy;
 
+  const d = distMeters(latitude, longitude, state.homeLocation.lat, state.homeLocation.lng);
+  state.lastDistanceFromHome = d;
+
+  // Always publish the latest position (with its accuracy) so the live map
+  // never freezes on an old fix — previously imprecise readings were
+  // dropped entirely, leaving pins stuck for days.
+  const loc = { lat: latitude, lng: longitude, accuracy: accuracy || null, updated_at: new Date().toISOString() };
+  await sbPost("/homeapp_member_location?on_conflict=member_id", [{ member_id: state.me.id, ...loc }], { "Prefer": "resolution=merge-duplicates,return=representation" })
+    .catch(()=> sbPatch("/homeapp_member_location?member_id=eq."+state.me.id, loc))
+    .catch(e => console.error("Saving live location failed:", e));
+
   // A reading this imprecise (e.g. WiFi/cell-tower estimate instead of a
-  // real GPS fix) can't reliably tell "home" from "away" — skip acting on
-  // it rather than flip the status based on noise.
+  // real GPS fix) can't reliably tell "home" from "away" — don't flip the
+  // status based on noise.
   if(accuracy && accuracy > 300){
-    state.lastDistanceFromHome = distMeters(latitude, longitude, state.homeLocation.lat, state.homeLocation.lng);
     if(state.tab === "settings") paint();
     return;
   }
 
-  const d = distMeters(latitude, longitude, state.homeLocation.lat, state.homeLocation.lng);
   const nowHome = d <= state.homeLocation.radius;
   const wasHome = state.me.is_home;
-  state.lastDistanceFromHome = d;
-
-  await sbPost("/homeapp_member_location?on_conflict=member_id", [{ member_id: state.me.id, lat: latitude, lng: longitude, updated_at: new Date().toISOString() }])
-    .catch(()=> sbPatch("/homeapp_member_location?member_id=eq."+state.me.id, { lat: latitude, lng: longitude, updated_at: new Date().toISOString() }));
   await sbPatch("/homeapp_members?id=eq."+state.me.id, { is_home: nowHome });
   state.me.is_home = nowHome;
 
@@ -622,33 +627,50 @@ async function useCurrentLocationAsHome(){
     setLocStatus("⏳ عم نحاول ناخد موقعك...");
   }
 
-  let settled = false;
-  // A manual, guaranteed timeout — some browsers/devices never call either
-  // callback if system-wide Location Services are off, ignoring the
-  // geolocation API's own `timeout` option. This makes sure the user always
-  // gets a message instead of the status hanging forever.
-  const manualTimeout = setTimeout(()=>{
-    if(settled) return;
-    settled = true;
-    setLocStatus("❌ المتصفح ما ردّ خلال 20 ثانية. تأكد إنو خدمات الموقع (GPS) مفعّلة من إعدادات الموبايل نفسو (مش بس المتصفح) — بالأندرويد: Settings → Location → On. جرّب كمان مرة بعدها.");
-  }, 20000);
+  // The first fix a phone reports is usually a coarse WiFi/cell estimate
+  // (often hundreds of meters off), so saving it as "home" put the house in
+  // the wrong spot. Watch for up to 20s instead, keep the most accurate
+  // reading, and stop early once it's good enough.
+  const GOOD_ENOUGH_M = 25, MAX_WAIT_MS = 20000;
+  let best = null, settled = false, watchId = null;
 
-  navigator.geolocation.getCurrentPosition(async (pos)=>{
+  const finish = async ()=>{
     if(settled) return;
     settled = true;
     clearTimeout(manualTimeout);
-    const { latitude, longitude } = pos.coords;
+    if(watchId !== null) navigator.geolocation.clearWatch(watchId);
+    if(!best){
+      // Some browsers/devices never call either callback if system-wide
+      // Location Services are off, ignoring the geolocation API's own
+      // `timeout` — this makes sure the user always gets a message.
+      setLocStatus("❌ المتصفح ما ردّ خلال 20 ثانية. تأكد إنو خدمات الموقع (GPS) مفعّلة من إعدادات الموبايل نفسو (مش بس المتصفح) — بالأندرويد: Settings → Location → On. جرّب كمان مرة بعدها.");
+      return;
+    }
+    const { latitude, longitude, accuracy } = best.coords;
     await upsertSetting("home_lat", latitude);
     await upsertSetting("home_lng", longitude);
     state.homeLocation = { lat: latitude, lng: longitude, radius: state.homeLocation?.radius || 100 };
     paint();
-    setLocStatus("✅ تم تحديد موقع البيت!");
+    setLocStatus(accuracy > 100
+      ? `⚠️ تحدد موقع البيت بس الدقة ضعيفة (±${Math.round(accuracy)}م). الأفضل تستعمل "🗺️ من الخريطة" أو تجرّب قرب شبّاك.`
+      : `✅ تم تحديد موقع البيت! (دقة ±${Math.round(accuracy)}م)`);
     startLocationTracking();
+  };
+  const manualTimeout = setTimeout(finish, MAX_WAIT_MS);
+
+  watchId = navigator.geolocation.watchPosition((pos)=>{
+    if(settled) return;
+    if(!best || pos.coords.accuracy < best.coords.accuracy) best = pos;
+    setLocStatus(`⏳ عم نحسّن الدقة... حاليًا ±${Math.round(best.coords.accuracy)}م`);
+    if(best.coords.accuracy <= GOOD_ENOUGH_M) finish();
   }, (err)=>{
     if(settled) return;
+    console.error("watchPosition failed:", err);
+    // Transient timeouts are fine as long as we already got something.
+    if(best && err.code === 3) return;
     settled = true;
     clearTimeout(manualTimeout);
-    console.error("getCurrentPosition failed:", err);
+    if(watchId !== null) navigator.geolocation.clearWatch(watchId);
     setLocStatus("❌ " + geoErrorMessage(err));
   }, { enableHighAccuracy: true, timeout: 19000, maximumAge: 0 });
 }
@@ -728,7 +750,7 @@ function visibleMemberLocations(){
   return (state.memberLocations || []).filter(l => l.homeapp_members && l.homeapp_members.location_sharing && l.lat != null && l.lng != null);
 }
 function liveMapPopupHTML(l, stale){
-  return `<b>${l.homeapp_members.emoji} ${esc(l.homeapp_members.name)}</b><br>${fmtTime(l.updated_at)}${stale ? "<br>⚠️ آخر تحديث مش حديث" : ""}`;
+  return `<b>${l.homeapp_members.emoji} ${esc(l.homeapp_members.name)}</b><br>${fmtTime(l.updated_at)}${l.accuracy ? ` · ±${Math.round(l.accuracy)}م` : ""}${stale ? "<br>⚠️ آخر تحديث مش حديث" : ""}`;
 }
 function liveMapLegendHTML(visible){
   return visible.length ? visible.map(l => {
