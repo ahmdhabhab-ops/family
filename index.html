@@ -147,10 +147,11 @@
 <div id="app"><div class="empty">Loading Our Home…</div></div>
 
 <script>
-const SUPABASE_URL = "https://tahbjwbmigoodfrfjpri.supabase.co";
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRhaGJqd2JtaWdvb2RmcmZqcHJpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgyNzQ2NTAsImV4cCI6MjEwMzg1MDY1MH0.Xj4VNL2MQzTgpwta48wDODqZgnHdjkaBzIWjJXc00uM";
-const REST = SUPABASE_URL + "/rest/v1";
-const VAPID_PUBLIC_KEY = "BNMgFCDUXW6SxsiCO8W2m0kBgiaoNWbYiBLW83l0itZH8CAwl_cgr1tgnesPhdAnu8OIzDKmfDvbh3lB0D7IiEM";
+// TODO: set this to your backend's real deployed URL (the Node/Express
+// service from /backend, e.g. "https://family-api.yourdomain.com").
+const API_BASE_URL = "http://localhost:4000";
+const API = API_BASE_URL + "/api";
+const VAPID_PUBLIC_KEY = "BKnSSCdrNjqgGLeyxNG4D3ZF8HedfHfo3Dverq5JpXejmJUbD6r0ifYf1FFgLUGXDdNGnYnh1dUy5dpGoDXZGGA";
 
 function urlBase64ToUint8Array(base64String){
   const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
@@ -161,14 +162,20 @@ function urlBase64ToUint8Array(base64String){
   return outputArray;
 }
 
-function sbHeaders(extra){
-  return Object.assign({ "apikey": SUPABASE_ANON_KEY, "Authorization": "Bearer " + SUPABASE_ANON_KEY, "Content-Type": "application/json" }, extra||{});
+function getToken(){ try{ return localStorage.getItem("authToken"); }catch(e){ return null; } }
+function setToken(t){ try{ if(t) localStorage.setItem("authToken", t); else localStorage.removeItem("authToken"); }catch(e){} }
+
+function apiHeaders(extra){
+  const h = Object.assign({ "Content-Type": "application/json" }, extra||{});
+  const token = getToken();
+  if(token) h["Authorization"] = "Bearer " + token;
+  return h;
 }
-async function sbFetch(path, opts){
+async function apiFetch(path, opts){
   const controller = new AbortController();
   const timer = setTimeout(()=> controller.abort(), 15000); // never let a request hang silently forever
   try{
-    const r = await fetch(REST + path, Object.assign({}, opts, { signal: controller.signal }));
+    const r = await fetch(API + path, Object.assign({}, opts, { signal: controller.signal }));
     return r;
   }catch(e){
     if(e.name === "AbortError") throw new Error("انتهى وقت الانتظار (15 ثانية) — تأكد من اتصالك بالإنترنت وجرّب كمان مرة.");
@@ -177,23 +184,23 @@ async function sbFetch(path, opts){
     clearTimeout(timer);
   }
 }
-async function sbGet(path){
-  const r = await sbFetch(path, { headers: sbHeaders() });
+async function apiGet(path){
+  const r = await apiFetch(path, { headers: apiHeaders() });
   if(!r.ok) throw new Error(await r.text());
   return r.json();
 }
-async function sbPost(path, body){
-  const r = await sbFetch(path, { method:"POST", headers: sbHeaders({ "Prefer":"return=representation" }), body: JSON.stringify(body) });
+async function apiPost(path, body){
+  const r = await apiFetch(path, { method:"POST", headers: apiHeaders(), body: JSON.stringify(body) });
   if(!r.ok) throw new Error(await r.text());
   return r.json();
 }
-async function sbPatch(path, body){
-  const r = await sbFetch(path, { method:"PATCH", headers: sbHeaders({ "Prefer":"return=representation" }), body: JSON.stringify(body) });
+async function apiPatch(path, body){
+  const r = await apiFetch(path, { method:"PATCH", headers: apiHeaders(), body: JSON.stringify(body) });
   if(!r.ok) throw new Error(await r.text());
   return r.json();
 }
-async function sbDelete(path){
-  const r = await sbFetch(path, { method:"DELETE", headers: sbHeaders() });
+async function apiDelete(path){
+  const r = await apiFetch(path, { method:"DELETE", headers: apiHeaders() });
   if(!r.ok) throw new Error(await r.text());
 }
 
@@ -275,10 +282,7 @@ async function submitPollResponse(pollId, text){
   if(!text || !text.trim() || !state.me) return;
   const val = text.trim();
   try{
-    await sbPost("/homeapp_poll_responses?on_conflict=poll_id,member_id", [{ poll_id: pollId, member_id: state.me.id, response: val }])
-      .catch(async ()=>{
-        await sbPatch("/homeapp_poll_responses?poll_id=eq."+pollId+"&member_id=eq."+state.me.id, { response: val });
-      });
+    await apiPost("/poll_responses", { poll_id: pollId, response: val });
     await refreshAll();
   }catch(e){
     console.error("submitPollResponse failed:", e);
@@ -303,11 +307,10 @@ function eventTextHTML(ev){ return isSystemEvent(ev) ? esc(ev.system_text || "")
 
 // ---------------- Data loading ----------------
 async function loadStatic(){
-  const [members, actionTypes, settings] = await Promise.all([
-    sbGet("/homeapp_members?select=*&order=created_at.asc"),
-    sbGet("/homeapp_action_types?select=*&order=sort_order.asc"),
-    sbGet("/homeapp_settings?select=*")
-  ]);
+  const promises = [apiGet("/members"), apiGet("/settings")];
+  // Action types require auth (the login screen only needs members+settings).
+  promises.push(getToken() ? apiGet("/action_types") : Promise.resolve(state.actionTypes));
+  const [members, settings, actionTypes] = await Promise.all(promises);
   state.members = members;
   state.actionTypes = actionTypes;
   const fn = settings.find(s => s.key === "family_name");
@@ -323,10 +326,10 @@ async function loadStatic(){
 }
 
 async function loadEvents(){
-  const raw = await sbGet("/homeapp_events?select=id,note,created_at,member_id,system_emoji,system_text,hidden_from_member_id,homeapp_members!homeapp_events_member_id_fkey(id,name,emoji,color,gender),homeapp_action_types(id,emoji,label,verb_template,verb_template_f)&order=created_at.desc&limit=200");
-  // A birthday gift-poll event is hidden from the one person it's about, so
-  // the surprise doesn't spoil for them — everyone else sees it normally.
-  const events = state.me ? raw.filter(ev => ev.hidden_from_member_id !== state.me.id) : raw;
+  if(!state.me) return;
+  // The backend already excludes events hidden from the caller (birthday
+  // gift-poll events hidden from the one person they're about).
+  const events = await apiGet("/events?limit=200");
   // detect new events from other people for notification/toast
   if(state.me){
     for(const ev of events){
@@ -348,121 +351,30 @@ async function loadEvents(){
 
 async function loadUnread(){
   if(!state.me) return;
-  state.unread = await sbGet("/homeapp_notifications?recipient_member_id=eq."+state.me.id+"&is_read=eq.false&select=id,created_at,homeapp_events(id,note,created_at,homeapp_members!homeapp_events_member_id_fkey(name,emoji,gender),homeapp_action_types(emoji,label,verb_template,verb_template_f))&order=created_at.desc");
+  state.unread = await apiGet("/notifications/unread");
 }
 
 async function loadPolls(){
-  const polls = await sbGet("/homeapp_polls?select=id,event_id,question,created_at,homeapp_poll_responses(member_id,response,homeapp_members(name,emoji,gender))&order=created_at.desc&limit=50");
+  if(!state.me) return;
+  const polls = await apiGet("/polls");
   const map = {};
   polls.forEach(p => { map[p.event_id] = p; });
   state.polls = map;
 }
 
 async function loadMemberLocations(){
-  state.memberLocations = await sbGet("/homeapp_member_location?select=member_id,lat,lng,updated_at,homeapp_members(name,emoji,location_sharing)");
+  if(!state.me) return;
+  state.memberLocations = await apiGet("/member_locations");
 }
 
-// ---------------- Birthdays ----------------
-// How many days from today until this member's next birthday (0 = today),
-// ignoring the year stored in birthday and wrapping to next year once
-// this year's date has passed.
-function daysUntilNextBirthday(birthdayStr){
-  const [, mo, d] = birthdayStr.split("-").map(Number);
-  const today = new Date(); today.setHours(0,0,0,0);
-  let next = new Date(today.getFullYear(), mo - 1, d);
-  if(next < today) next = new Date(today.getFullYear() + 1, mo - 1, d);
-  return Math.round((next - today) / 86400000);
-}
-
-// Runs on every refresh. Two things happen automatically, each guarded by
-// a "claimed this year already?" column so repeated checks (every 2.5s,
-// from every logged-in device) don't create duplicates:
-//  - 7 days out: a hidden-from-them gift poll goes to everyone else.
-//  - on the day: a happy-birthday post goes to everyone, them included.
-async function checkBirthdays(){
-  if(!state.me || !state.members.length) return;
-  const year = new Date().getFullYear();
-  for(const m of state.members){
-    if(!m.birthday) continue;
-    const days = daysUntilNextBirthday(m.birthday);
-    if(days === 7 && m.birthday_gift_poll_year !== year){
-      await tryClaimBirthdayMilestone(m, "birthday_gift_poll_year", year, async () => {
-        const text = `🎁 عيد ميلاد ${m.name} بعد أسبوع بالضبط! شو رح ${m.gender === "f" ? "تجيبولها" : "تجيبوله"} هدية؟`;
-        const ev = (await sbPost("/homeapp_events", { system_emoji: "🎁", system_text: text, hidden_from_member_id: m.id }))[0];
-        await sbPost("/homeapp_polls", { event_id: ev.id, question: `شو رح تجيبوا هدية لـ ${m.name}؟` });
-        const others = state.members.filter(mm => mm.id !== m.id);
-        if(others.length){
-          await sbPost("/homeapp_notifications", others.map(o => ({ event_id: ev.id, recipient_member_id: o.id })));
-          sendPush(state.familyName, text, others.map(o => o.id));
-        }
-      });
-    } else if(days === 0 && m.birthday_wish_year !== year){
-      await tryClaimBirthdayMilestone(m, "birthday_wish_year", year, async () => {
-        const text = `🎉 عيد ميلاد سعيد يا ${m.name}! 🎂`;
-        const ev = (await sbPost("/homeapp_events", { system_emoji: "🎉", system_text: text }))[0];
-        await sbPost("/homeapp_notifications", state.members.map(o => ({ event_id: ev.id, recipient_member_id: o.id })));
-        sendPush(state.familyName, text, state.members.map(o => o.id));
-      });
-    }
-  }
-}
-
-// Atomically flips `column` to `year` on member `m` only if it isn't
-// already set to `year` — PostgREST returns the updated row only when the
-// filter matched, so an empty result means another device already claimed
-// this milestone and `action` must not run again.
-async function tryClaimBirthdayMilestone(m, column, year, action){
-  try{
-    const claimed = await sbPatch(
-      "/homeapp_members?id=eq." + m.id + "&or=(" + column + ".is.null," + column + ".neq." + year + ")",
-      { [column]: year }
-    );
-    if(claimed.length) await action();
-  }catch(e){ console.error("checkBirthdays: failed for " + m.name + ":", e); }
-}
-
-// ---------------- Missing-birthday reminder ----------------
-// Atomically claims this member's next weekly reminder slot, same
-// GET-then-POST-or-PATCH idea as the nescafe day claim: a homeapp_settings
-// row per member holds the ISO time of their last reminder, and a device
-// only sends one if that row is missing or more than a week old.
-async function tryClaimBirthdayReminder(memberId){
-  const key = "birthday_reminder_" + memberId;
-  const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-  const now = new Date().toISOString();
-  try{
-    const existing = await sbGet("/homeapp_settings?key=eq."+key+"&select=value");
-    if(!existing.length){
-      try{ await sbPost("/homeapp_settings", { key, value: now }); return true; }
-      catch(e){ return false; }
-    }
-    if(existing[0].value > cutoff) return false; // already reminded within the last week
-    const claimed = await sbPatch("/homeapp_settings?key=eq."+key+"&value=eq."+encodeURIComponent(existing[0].value), { value: now });
-    return claimed.length > 0;
-  }catch(e){ console.error("tryClaimBirthdayReminder failed:", e); return false; }
-}
-
-// Runs on every refresh: nudges each member who hasn't set a birthday yet,
-// at most once a week per member, until they set one.
-async function checkMissingBirthdays(){
-  if(!state.me || !state.members.length) return;
-  for(const m of state.members){
-    if(m.birthday) continue;
-    const claimed = await tryClaimBirthdayReminder(m.id);
-    if(!claimed) continue;
-    try{
-      const text = `🎂 لسا ما حطّيت تاريخ عيد ميلادك يا ${m.name}! فوت عالإعدادات ⚙️ وحطّو، حتى نحتفل فيك ونجهّزلك مفاجأة 🎁`;
-      const ev = (await sbPost("/homeapp_events", { system_emoji: "🎂", system_text: text }))[0];
-      await sbPost("/homeapp_notifications", [{ event_id: ev.id, recipient_member_id: m.id }]);
-      sendPush(state.familyName, text, [m.id]);
-    }catch(e){ console.error("checkMissingBirthdays: failed for " + m.name + ":", e); }
-  }
-}
+// Birthday polls/wishes, the weekly missing-birthday nudge, meal polls,
+// the daily summary, the nescafe rotation and the azan safety check are
+// all handled by the backend's own cron jobs now (see backend/src/cron.js)
+// — the client just displays whatever they post, same as everything else
+// in the feed.
 
 async function refreshAll(render=true){
   try{
-    await checkBirthdays();
-    await checkMissingBirthdays();
     await loadEvents();
     await loadUnread();
     await loadPolls();
@@ -492,15 +404,7 @@ async function ensurePushSubscription(){
       });
     }
     const json = sub.toJSON();
-    await sbPost("/homeapp_push_subscriptions?on_conflict=endpoint", [{
-      member_id: state.me.id,
-      endpoint: json.endpoint,
-      p256dh: json.keys.p256dh,
-      auth: json.keys.auth
-    }]).catch(async ()=>{
-      // fallback if upsert-on-conflict header isn't honored: try a plain patch by endpoint
-      await sbPatch("/homeapp_push_subscriptions?endpoint=eq."+encodeURIComponent(json.endpoint), { member_id: state.me.id, p256dh: json.keys.p256dh, auth: json.keys.auth });
-    });
+    await apiPost("/push_subscriptions", { endpoint: json.endpoint, p256dh: json.keys.p256dh, auth: json.keys.auth });
     return sub;
   }catch(e){
     console.error("Push subscribe failed:", e);
@@ -511,20 +415,13 @@ async function ensurePushSubscription(){
 async function sendPush(title, body, recipientIds){
   if(!recipientIds.length) return;
   try{
-    await fetch(SUPABASE_URL + "/functions/v1/send-push", {
-      method: "POST",
-      headers: { "Authorization": "Bearer " + SUPABASE_ANON_KEY, "apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json" },
-      body: JSON.stringify({ title, body, recipient_member_ids: recipientIds })
-    });
+    await apiPost("/send-push", { title, body, recipient_member_ids: recipientIds });
   }catch(e){ console.error("send-push failed:", e); }
 }
 
 // ---------------- Home Geofencing ----------------
 async function upsertSetting(key, value){
-  const patched = await sbPatch("/homeapp_settings?key=eq."+key, { value: String(value) });
-  if(!patched || !patched.length){
-    await sbPost("/homeapp_settings", { key, value: String(value) });
-  }
+  await apiPatch("/settings/" + encodeURIComponent(key), { value: String(value) });
 }
 
 function distMeters(lat1, lng1, lat2, lng2){
@@ -554,9 +451,8 @@ async function onPositionUpdate(pos){
   const wasHome = state.me.is_home;
   state.lastDistanceFromHome = d;
 
-  await sbPost("/homeapp_member_location?on_conflict=member_id", [{ member_id: state.me.id, lat: latitude, lng: longitude, updated_at: new Date().toISOString() }])
-    .catch(()=> sbPatch("/homeapp_member_location?member_id=eq."+state.me.id, { lat: latitude, lng: longitude, updated_at: new Date().toISOString() }));
-  await sbPatch("/homeapp_members?id=eq."+state.me.id, { is_home: nowHome });
+  await apiPost("/member_location", { lat: latitude, lng: longitude });
+  await apiPatch("/members/" + state.me.id, { is_home: nowHome });
   state.me.is_home = nowHome;
 
   if(wasHome !== null && wasHome !== nowHome){
@@ -587,7 +483,7 @@ function stopLocationTracking(){
 
 async function toggleLocationSharing(){
   const next = !state.me.location_sharing;
-  await sbPatch("/homeapp_members?id=eq."+state.me.id, { location_sharing: next, is_home: next ? state.me.is_home : null });
+  await apiPatch("/members/" + state.me.id, { location_sharing: next, is_home: next ? state.me.is_home : null });
   state.me.location_sharing = next;
   if(next) startLocationTracking(); else stopLocationTracking();
   paint();
@@ -919,15 +815,15 @@ async function openMapPicker(){
 // ---------------- Actions ----------------
 async function performAction(actionType, note){
   try{
-    const created = await sbPost("/homeapp_events", { member_id: state.me.id, action_type_id: actionType.id, note: note || null });
+    const created = await apiPost("/events", { action_type_id: actionType.id, note: note || null });
     const ev = created[0];
     if(actionType.creates_poll){
       const question = pickTemplate(actionType, state.me).replace("{name}", state.me.name);
-      await sbPost("/homeapp_polls", { event_id: ev.id, question });
+      await apiPost("/polls", { event_id: ev.id, question });
     }
     const others = state.members.filter(m => m.id !== state.me.id);
     if(others.length){
-      await sbPost("/homeapp_notifications", others.map(m => ({ event_id: ev.id, recipient_member_id: m.id })));
+      await apiPost("/notifications", others.map(m => ({ event_id: ev.id, recipient_member_id: m.id })));
       const sentence = pickTemplate(actionType, state.me).replace("{name}", state.me.name);
       sendPush(state.familyName, actionType.emoji + " " + sentence, others.map(m => m.id));
     }
@@ -959,7 +855,7 @@ function showToast(msg){
 
 async function markAllRead(){
   if(!state.me || !state.unread.length) return;
-  await sbPatch("/homeapp_notifications?recipient_member_id=eq."+state.me.id+"&is_read=eq.false", { is_read:true });
+  await apiPatch("/notifications/mark-read", {});
   await refreshAll();
 }
 
@@ -969,7 +865,7 @@ async function addCustomAction(){
   const emoji = prompt("إيموجي إلو (مثلاً 🌱):", "✨") || "✨";
   const verb_template = prompt("الجملة يلي بتظهر بالـ feed (استخدم {name} مكان الاسم)، بصيغة المذكر:\nمثال: {name} سقى النباتات", "{name} " + label) || ("{name} " + label);
   const verb_template_f = prompt("نفس الجملة بس بصيغة المؤنث (لسارة مثلاً):\nمثال: {name} سقت النباتات", verb_template) || verb_template;
-  await sbPost("/homeapp_action_types", { emoji, label, verb_template, verb_template_f, allows_note:false, is_custom:true, sort_order:99 });
+  await apiPost("/action_types", { emoji, label, verb_template, verb_template_f, allows_note:false, is_custom:true, sort_order:99 });
   await loadStatic();
   paint();
 }
@@ -981,14 +877,14 @@ async function editAction(at){
   if(!emoji) return;
   const verb_template = prompt("جملة الـ feed (مذكر) — استخدم {name}:", at.verb_template) || at.verb_template;
   const verb_template_f = prompt("نفس الجملة (مؤنث):", at.verb_template_f || verb_template) || verb_template;
-  await sbPatch("/homeapp_action_types?id=eq."+at.id, { label, emoji, verb_template, verb_template_f });
+  await apiPatch("/action_types/"+at.id, { label, emoji, verb_template, verb_template_f });
   await loadStatic();
   paint();
 }
 
 async function removeCustomAction(at){
   if(!confirm("Delete '" + at.label + "'? This also removes it from the Quick Actions grid and deletes any past activity logged under it.")) return;
-  await sbDelete("/homeapp_action_types?id=eq."+at.id);
+  await apiDelete("/action_types/"+at.id);
   await loadStatic();
   paint();
 }
@@ -996,7 +892,7 @@ async function removeCustomAction(at){
 async function renameFamily(){
   const name = prompt("Family name:", state.familyName);
   if(!name) return;
-  await sbPatch("/homeapp_settings?key=eq.family_name", { value:name });
+  await apiPatch("/settings/family_name", { value:name });
   state.familyName = name;
   paint();
 }
@@ -1010,7 +906,7 @@ async function setBirthday(){
     alert("لازم تدخل تاريخ صحيح بصيغة YYYY-MM-DD، متلاً 1990-05-20.");
     return;
   }
-  await sbPatch("/homeapp_members?id=eq."+state.me.id, { birthday: value });
+  await apiPatch("/members/"+state.me.id, { birthday: value });
   state.me.birthday = value;
   paint();
 }
@@ -1038,10 +934,18 @@ function toggleNotifPermission(){
 }
 
 // ---------------- PIN auth ----------------
-async function sha256Hex(text){
-  const enc = new TextEncoder().encode(text);
-  const buf = await crypto.subtle.digest("SHA-256", enc);
-  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
+// One backend call covers both "verify existing PIN" and "set first PIN":
+// the server sets the PIN if the member doesn't have one yet, otherwise it
+// compares hashes — either way, a 200 means we're now holding a fresh
+// session token for that member. Throws on wrong PIN (401) or network error.
+async function loginWithPin(memberId, pin){
+  const r = await apiFetch("/auth/login", { method: "POST", headers: apiHeaders(), body: JSON.stringify({ member_id: memberId, pin }) });
+  if(!r.ok){
+    if(r.status === 401) throw new Error("WRONG_PIN");
+    throw new Error(await r.text());
+  }
+  const { token } = await r.json();
+  setToken(token);
 }
 
 function loginAs(member){
@@ -1126,13 +1030,18 @@ function promptForPin(member, { title = "Enter PIN", subtitle = "" } = {}){
     const errEl = document.getElementById("promptPinError");
     wirePinDots("prompt", async (pin, { reject }) => {
       errEl.textContent = "";
-      const hash = await sha256Hex(pin);
-      if(hash === member.pin_hash){
+      try{
+        await loginWithPin(member.id, pin);
         overlay.remove();
         resolve(true);
-      } else {
-        errEl.textContent = "❌ PIN غلط";
-        reject();
+      } catch(e){
+        if(e.message === "WRONG_PIN"){
+          errEl.textContent = "❌ PIN غلط";
+          reject();
+        } else {
+          errEl.textContent = "ما قدرنا نتحقق: " + e.message;
+          reject();
+        }
       }
     });
   });
@@ -1156,11 +1065,11 @@ function renderPinEntry(member){
 
   wirePinDots("pin", async (pin, { reject }) => {
     errEl.textContent = "";
-    const hash = await sha256Hex(pin);
-    if(hash === member.pin_hash){
+    try{
+      await loginWithPin(member.id, pin);
       loginAs(member);
-    } else {
-      errEl.textContent = "❌ رقم سري غلط، جرّب كمان مرة";
+    } catch(e){
+      errEl.textContent = e.message === "WRONG_PIN" ? "❌ رقم سري غلط، جرّب كمان مرة" : "ما قدرنا نتحقق: " + e.message;
       reject();
     }
   });
@@ -1193,9 +1102,8 @@ function renderPinSetup(member, firstEntry = "", error = ""){
       return;
     }
     try{
-      const hash = await sha256Hex(pin);
-      await sbPatch("/homeapp_members?id=eq." + member.id, { pin_hash: hash });
-      member.pin_hash = hash;
+      await loginWithPin(member.id, pin);
+      member.has_pin = true;
       loginAs(member);
     } catch(e){
       reject();
@@ -1206,13 +1114,18 @@ function renderPinSetup(member, firstEntry = "", error = ""){
 
 // Switching into another member's session from the top-bar chips needs
 // their PIN too — otherwise anyone holding the phone could hop into any
-// profile without ever going back through the login screen.
+// profile without ever going back through the login screen. promptForPin
+// already performs the real server-side login and swaps in a fresh token
+// for `member`, so once it resolves true we're already authenticated as
+// them — this just updates local UI state to match.
 async function switchToMember(member){
   if(!member || member.id === state.me.id) return;
-  if(member.pin_hash){
-    const ok = await promptForPin(member, { title: `دخّل PIN ${esc(member.name)}`, subtitle: `${member.emoji} ${esc(member.name)}` });
-    if(!ok) return;
+  if(!member.has_pin){
+    alert(`${member.name} لسا ما حدد PIN. خلّيه يدخل من صفحة تسجيل الدخول أول مرة (سجّل خروج ودوس عليه من هونيك).`);
+    return;
   }
+  const ok = await promptForPin(member, { title: `دخّل PIN ${esc(member.name)}`, subtitle: `${member.emoji} ${esc(member.name)}` });
+  if(!ok) return;
   stopLocationTracking();
   state.me = member;
   refreshAll();
@@ -1221,7 +1134,7 @@ async function switchToMember(member){
 
 // ---- Set / change a member's own PIN, from Settings ----
 async function openChangePinFlow(member){
-  if(member.pin_hash){
+  if(member.has_pin){
     const ok = await promptForPin(member, { title: "أكّد الـ PIN الحالي" });
     if(!ok) return;
   }
@@ -1258,9 +1171,8 @@ function renderNewPinStep(member, firstEntry){
       return;
     }
     try{
-      const hash = await sha256Hex(pin);
-      await sbPatch("/homeapp_members?id=eq." + member.id, { pin_hash: hash });
-      member.pin_hash = hash;
+      await apiPost("/auth/change-pin", { pin });
+      member.has_pin = true;
       overlay.remove();
       showToast("✅ تم تغيير الـ PIN");
       if(state.tab === "settings") paint();
@@ -1295,7 +1207,7 @@ function renderLogin(){
     el.addEventListener("click", ()=>{
       const member = state.members.find(m => m.id === el.dataset.id);
       if(!member) return;
-      if(member.pin_hash) renderPinEntry(member);
+      if(member.has_pin) renderPinEntry(member);
       else renderPinSetup(member);
     });
   });
