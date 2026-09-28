@@ -467,6 +467,13 @@ async function onPositionUpdate(pos){
 function startLocationTracking(){
   if(!("geolocation" in navigator) || state.watchId !== null) return;
   if(!state.me || !state.me.location_sharing || !state.homeLocation) return;
+  // watchPosition alone often hands back a cached fix (or nothing) right
+  // after the app comes back from the background, so force a fresh one.
+  navigator.geolocation.getCurrentPosition(
+    onPositionUpdate,
+    (err)=> console.error("Geolocation error:", err),
+    { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 }
+  );
   state.watchId = navigator.geolocation.watchPosition(
     onPositionUpdate,
     (err)=> console.error("Geolocation error:", err),
@@ -480,6 +487,14 @@ function stopLocationTracking(){
     state.watchId = null;
   }
 }
+
+// Mobile browsers suspend geolocation watches while the PWA is backgrounded
+// and don't reliably resume them, so restart tracking whenever it's reopened.
+document.addEventListener("visibilitychange", ()=>{
+  if(document.visibilityState !== "visible" || !state.me) return;
+  stopLocationTracking();
+  startLocationTracking();
+});
 
 async function toggleLocationSharing(){
   const next = !state.me.location_sharing;
@@ -606,19 +621,35 @@ let mapTabMounted = false; // true once the Map tab's DOM + Leaflet instance exi
 const LIVE_LOCATION_STALE_MS = 30 * 60 * 1000;
 function isStaleLocation(updatedAt){ return (Date.now() - new Date(updatedAt).getTime()) > LIVE_LOCATION_STALE_MS; }
 
-// The topbar 🟢/🔴 chip used to trust homeapp_members.is_home blindly, with
-// no idea how old that flag actually was — a GPS fix from days ago (e.g.
-// nobody having the app open long enough for background tracking, a known
-// PWA limitation) still rendered as a confident "at home" for everyone.
-// Now it falls back to a neutral badge whenever the underlying location
-// fix is missing or stale.
+function locationAgeLabel(iso){
+  const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  if(mins < 60) return mins + "د";
+  const hours = Math.round(mins / 60);
+  if(hours < 24) return hours + "س";
+  return Math.round(hours / 24) + "ي";
+}
+
+// Home/away is derived from the member's actual last GPS fix vs. the home
+// radius, not the stored is_home flag — that flag can drift out of sync
+// with the coordinates (seen in the wild: a fix 1.4km away still flagged
+// "at home"). Stale fixes are dimmed and show how old they are.
 function memberHomeBadgeHTML(m){
-  if(!m.location_sharing || m.is_home === null) return "";
+  if(!m.location_sharing) return "";
   const loc = (state.memberLocations || []).find(l => l.member_id === m.id);
-  if(!loc || isStaleLocation(loc.updated_at)){
+  if(!loc || loc.lat == null || loc.lng == null){
     return `<span class="home-badge stale">⏱️ مش معروف</span>`;
   }
-  return `<span class="home-badge ${m.is_home ? 'home' : 'away'}">${m.is_home ? '🟢 بالبيت' : '🔴 برا'}</span>`;
+  const home = state.homeLocation
+    ? distMeters(loc.lat, loc.lng, state.homeLocation.lat, state.homeLocation.lng) <= state.homeLocation.radius
+    : m.is_home;
+  if(home === null || home === undefined){
+    return `<span class="home-badge stale">⏱️ مش معروف</span>`;
+  }
+  const label = home ? "🟢 بالبيت" : "🔴 برا";
+  if(isStaleLocation(loc.updated_at)){
+    return `<span class="home-badge stale">${label} · من ${locationAgeLabel(loc.updated_at)}</span>`;
+  }
+  return `<span class="home-badge ${home ? "home" : "away"}">${label}</span>`;
 }
 function visibleMemberLocations(){
   return (state.memberLocations || []).filter(l => l.homeapp_members && l.homeapp_members.location_sharing && l.lat != null && l.lng != null);
