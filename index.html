@@ -535,36 +535,75 @@ function distMeters(lat1, lng1, lat2, lng2){
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
+// Readings worse than this are WiFi/cell-tower guesses, not GPS.
+const COARSE_FIX_M = 300;
+
+// true = home, false = away, null = the fix can't tell. "Away" needs even the
+// nearest edge of the fix's error circle to be outside the home radius, so
+// normal indoor GPS drift (a reading 120m out with ±40m error) can't flip
+// someone to "away".
+function homeStatusFromFix(lat, lng, accuracy){
+  if(!state.homeLocation) return null;
+  const acc = accuracy || 0;
+  if(acc > COARSE_FIX_M) return null;
+  const d = distMeters(lat, lng, state.homeLocation.lat, state.homeLocation.lng);
+  if(d <= state.homeLocation.radius) return true;
+  if(d - acc > state.homeLocation.radius) return false;
+  return null;
+}
+
+const LOCATION_PUBLISH_MIN_MS = 20000, LOCATION_PUBLISH_MIN_MOVE_M = 25, GOOD_FIX_KEEP_MS = 10 * 60 * 1000;
+let lastPublishedFix = null; // { lat, lng, accuracy, at }
+let pendingHomeStatus = null, pendingHomeCount = 0;
+
+function shouldPublishFix(lat, lng, accuracy){
+  const prev = lastPublishedFix;
+  if(!prev) return true;
+  const age = Date.now() - prev.at;
+  // Don't replace a recent, precise pin with a coarse guess; once the good
+  // fix is old enough, publish anyway so the pin never freezes for days.
+  if(accuracy > COARSE_FIX_M && prev.accuracy <= COARSE_FIX_M && age < GOOD_FIX_KEEP_MS) return false;
+  if(accuracy < prev.accuracy / 2) return true;
+  return age >= LOCATION_PUBLISH_MIN_MS || distMeters(lat, lng, prev.lat, prev.lng) >= LOCATION_PUBLISH_MIN_MOVE_M;
+}
+
 async function onPositionUpdate(pos){
   if(!state.me || !state.homeLocation) return;
-  const { latitude, longitude, accuracy } = pos.coords;
+  const { latitude, longitude } = pos.coords;
+  const accuracy = pos.coords.accuracy || 0;
   state.lastGpsAccuracy = accuracy;
+  state.lastDistanceFromHome = distMeters(latitude, longitude, state.homeLocation.lat, state.homeLocation.lng);
 
-  const d = distMeters(latitude, longitude, state.homeLocation.lat, state.homeLocation.lng);
-  state.lastDistanceFromHome = d;
+  if(shouldPublishFix(latitude, longitude, accuracy)){
+    lastPublishedFix = { lat: latitude, lng: longitude, accuracy, at: Date.now() };
+    const loc = { lat: latitude, lng: longitude, accuracy: accuracy || null, updated_at: new Date().toISOString() };
+    await sbPost("/homeapp_member_location?on_conflict=member_id", [{ member_id: state.me.id, ...loc }], { "Prefer": "resolution=merge-duplicates,return=representation" })
+      .catch(()=> sbPatch("/homeapp_member_location?member_id=eq."+state.me.id, loc))
+      .catch(e => console.error("Saving live location failed:", e));
+  }
 
-  // Always publish the latest position (with its accuracy) so the live map
-  // never freezes on an old fix — previously imprecise readings were
-  // dropped entirely, leaving pins stuck for days.
-  const loc = { lat: latitude, lng: longitude, accuracy: accuracy || null, updated_at: new Date().toISOString() };
-  await sbPost("/homeapp_member_location?on_conflict=member_id", [{ member_id: state.me.id, ...loc }], { "Prefer": "resolution=merge-duplicates,return=representation" })
-    .catch(()=> sbPatch("/homeapp_member_location?member_id=eq."+state.me.id, loc))
-    .catch(e => console.error("Saving live location failed:", e));
-
-  // A reading this imprecise (e.g. WiFi/cell-tower estimate instead of a
-  // real GPS fix) can't reliably tell "home" from "away" — don't flip the
-  // status based on noise.
-  if(accuracy && accuracy > 300){
+  const status = homeStatusFromFix(latitude, longitude, accuracy);
+  const wasHome = state.me.is_home;
+  if(status === null || status === wasHome){
+    pendingHomeStatus = null; pendingHomeCount = 0;
     if(state.tab === "settings") paint();
     return;
   }
 
-  const nowHome = d <= state.homeLocation.radius;
-  const wasHome = state.me.is_home;
+  // Flipping home/away posts an "arrived"/"left" event to the whole family,
+  // so require two decisive readings in a row first (the first one after a
+  // long gap, e.g. reopening the app, is often still settling).
+  if(wasHome !== null && wasHome !== undefined){
+    if(pendingHomeStatus !== status){ pendingHomeStatus = status; pendingHomeCount = 1; return; }
+    if(++pendingHomeCount < 2) return;
+  }
+  pendingHomeStatus = null; pendingHomeCount = 0;
+
+  const nowHome = status;
   await sbPatch("/homeapp_members?id=eq."+state.me.id, { is_home: nowHome });
   state.me.is_home = nowHome;
 
-  if(wasHome !== null && wasHome !== nowHome){
+  if(wasHome !== null && wasHome !== undefined && wasHome !== nowHome){
     const label = nowHome ? "وصلت عالبيت" : "طالع من البيت";
     const at = state.actionTypes.find(a => a.label === label);
     if(at) await performAction(at, null);
@@ -755,19 +794,18 @@ function locationAgeLabel(iso){
   return Math.round(hours / 24) + "ي";
 }
 
-// Home/away is derived from the member's actual last GPS fix vs. the home
-// radius, not the stored is_home flag — that flag can drift out of sync
-// with the coordinates (seen in the wild: a fix 1.4km away still flagged
-// "at home"). Stale fixes are dimmed and show how old they are.
+// Home/away comes from the member's last fix when that fix is precise enough
+// to decide (see homeStatusFromFix); a coarse WiFi/cell reading falls back to
+// the stored is_home, which only changes on confirmed readings. Stale fixes
+// are dimmed and show how old they are.
 function memberHomeBadgeHTML(m){
   if(!m.location_sharing) return "";
   const loc = (state.memberLocations || []).find(l => l.member_id === m.id);
   if(!loc || loc.lat == null || loc.lng == null){
     return `<span class="home-badge stale">⏱️ مش معروف</span>`;
   }
-  const home = state.homeLocation
-    ? distMeters(loc.lat, loc.lng, state.homeLocation.lat, state.homeLocation.lng) <= state.homeLocation.radius
-    : m.is_home;
+  const fromFix = homeStatusFromFix(loc.lat, loc.lng, loc.accuracy);
+  const home = fromFix !== null ? fromFix : m.is_home;
   if(home === null || home === undefined){
     return `<span class="home-badge stale">⏱️ مش معروف</span>`;
   }
